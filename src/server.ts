@@ -5,20 +5,32 @@ import rateLimit from '@fastify/rate-limit';
 import { getEnv } from './lib/env';
 import { buildLoggerOptions } from './lib/logger';
 import { createGroupReadModel, type GroupReadModel } from './db/groups';
+import { createAccountReadModel, type AccountReadModel } from './db/me';
 import { getDb } from './db/client';
+import { createRequireAuth } from './auth/guard';
+import { createTokenVerifier, type TokenVerifier } from './auth/verify';
+import {
+  createAccountDeleter,
+  createSupabaseAdminClient,
+  type AccountDeleter,
+} from './supabase/admin';
 import { healthRoutes } from './routes/health';
 import { groupRoutes } from './routes/groups';
+import { meRoutes } from './routes/me';
 
 /**
  * Dependencies a caller may substitute.
  *
- * Both are injectable so tests can exercise the routes — including the failure
- * paths, which are the ones worth testing — without a database. Production
- * passes neither and gets the real implementations.
+ * All are injectable so tests can exercise the routes — including the failure
+ * paths, which are the ones worth testing — without a database or a Supabase
+ * project. Production passes none of them and gets the real implementations.
  */
 export type BuildServerOptions = {
   readModel?: GroupReadModel;
   probeDatabase?: () => Promise<void>;
+  accountReadModel?: AccountReadModel;
+  verifyToken?: TokenVerifier;
+  deleteAccount?: AccountDeleter;
 };
 
 /**
@@ -64,6 +76,22 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   });
 
   await app.register(healthRoutes, { probeDatabase: options.probeDatabase });
+
+  // One Supabase client, shared by token verification and account deletion.
+  // Constructing it opens no connection, so this costs nothing on routes that
+  // never touch Supabase.
+  const supabase = createSupabaseAdminClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  const verifyToken = options.verifyToken ?? createTokenVerifier(supabase);
+  const deleteAccount = options.deleteAccount ?? createAccountDeleter(supabase);
+
+  // Account routes are the authenticated surface: each declares `requireAuth`,
+  // and identity comes from the verified token rather than from the request.
+  await app.register(meRoutes, {
+    prefix: '/api/v1',
+    accountReadModel: options.accountReadModel ?? createAccountReadModel(getDb()),
+    requireAuth: createRequireAuth(verifyToken),
+    deleteAccount,
+  });
 
   // Versioned application surface. `getDb()` builds a connection pool lazily, so
   // constructing the read model opens no connection until the first query.

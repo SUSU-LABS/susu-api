@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { GroupReadModel, PageResult } from '../db/groups';
+import { invalidRequest } from './errors';
 
 /**
  * Read-only group endpoints.
@@ -71,16 +72,6 @@ const pageQuery = z.object(paginationFields);
 export type GroupRoutesOptions = {
   readModel: GroupReadModel;
 };
-
-function invalidRequest(reply: FastifyReply, error: z.ZodError): FastifyReply {
-  return reply.code(400).send({
-    error: 'invalid_request',
-    details: error.issues.map((issue) => ({
-      path: issue.path.join('.') || '(root)',
-      message: issue.message,
-    })),
-  });
-}
 
 function groupNotFound(reply: FastifyReply): FastifyReply {
   return reply.code(404).send({ error: 'group_not_found' });
