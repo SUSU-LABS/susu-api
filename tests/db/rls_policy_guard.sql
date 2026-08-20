@@ -306,6 +306,18 @@ reset role;
 \set group_id '''CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC'''
 \set invite_code '''abcdefghijklmnopqrstuvwxyz0123456789ABCD'''
 
+-- psql substitutes :variables before the server ever parses the statement, but it
+-- does not substitute inside a dollar-quoted body — the server receives a literal
+-- ':' and rejects the statement. The refusal checks below need those values inside
+-- a `do $$ ... $$` block to trap a constraint violation, so the values are
+-- republished as session settings, which the blocks can read across that boundary.
+--
+-- Republished rather than re-typed: a hand-copied literal inside a block would
+-- keep passing after the value above changed, turning a real assertion into a
+-- vacuous one, which is the exact failure this guard exists to prevent.
+select set_config('guard.group_id', :group_id, false),
+       set_config('guard.user_id', :user_one, false);
+
 insert into public.wallet_links (user_id, address) values
   (:user_one, :wallet_one),
   (:user_two, :wallet_two)
@@ -353,11 +365,14 @@ $$;
 -- therefore enumerable. Asserted as a refusal, because a constraint that is
 -- never exercised is a constraint that may not work.
 do $$
-declare refused boolean := false;
+declare
+  refused boolean := false;
+  v_group text := current_setting('guard.group_id');
+  v_user  uuid := current_setting('guard.user_id');
 begin
   begin
     insert into public.invite_links (code, group_contract_id, created_by)
-    values (:group_id, :group_id, :user_one);
+    values (v_group, v_group, v_user);
   exception when check_violation then
     refused := true;
   end;
@@ -371,11 +386,14 @@ end
 $$;
 
 do $$
-declare refused boolean := false;
+declare
+  refused boolean := false;
+  v_group text := current_setting('guard.group_id');
+  v_user  uuid := current_setting('guard.user_id');
 begin
   begin
     insert into public.invite_links (code, group_contract_id, created_by)
-    values ('tooshort', :group_id, :user_one);
+    values ('tooshort', v_group, v_user);
   exception when check_violation then
     refused := true;
   end;
@@ -517,11 +535,14 @@ end
 $$;
 
 do $$
-declare denied boolean := false;
+declare
+  denied boolean := false;
+  v_group text := current_setting('guard.group_id');
+  v_user  uuid := current_setting('guard.user_id');
 begin
   begin
     insert into public.invite_links (code, group_contract_id, created_by)
-    values ('zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz', :group_id, :user_one);
+    values ('zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz', v_group, v_user);
   exception when insufficient_privilege then
     denied := true;
   end;
