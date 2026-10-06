@@ -49,28 +49,52 @@ const displayNameSchema = z
   .nullable();
 
 /**
+ * Escapes a literal for embedding in a RegExp. The user id is a UUID in
+ * practice, but the shape check must not depend on that assumption.
+ */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
  * The avatar is stored as an object key, never a URL, and the key must stay a
  * relative path with no traversal. The upload path lands in a later phase; the
  * column is validated now so a stored value cannot become a path that resolves
  * outside the user's own prefix.
+ *
+ * The database constrains the exact shape further
+ * (`users/<the row's own user id>/avatar/<32 hex>.<ext>`, migration
+ * `0004_profile_images`). The route is the first line of refusal: a value the
+ * database would reject is a 400 here, never a 500 from the constraint.
  */
-const avatarPathSchema = z
-  .string()
-  .trim()
-  .min(1, 'must not be empty')
-  .max(255, 'must be 255 characters or fewer')
-  .refine((value) => !value.startsWith('/'), 'must be a relative object key')
-  .refine((value) => !value.includes('..'), 'must not contain ".."')
-  .nullable();
+function avatarPathSchemaFor(userId: string) {
+  const shape = new RegExp(
+    `^users/${escapeRegExp(userId)}/avatar/[0-9a-f]{32}\\.(png|jpe?g|webp)$`,
+  );
+  return z
+    .string()
+    .trim()
+    .min(1, 'must not be empty')
+    .max(255, 'must be 255 characters or fewer')
+    .refine((value) => !value.startsWith('/'), 'must be a relative object key')
+    .refine((value) => !value.includes('..'), 'must not contain ".."')
+    .refine(
+      (value) => shape.test(value),
+      'must match users/<your user id>/avatar/<32 hex chars>.(png|jpg|jpeg|webp)',
+    )
+    .nullable();
+}
 
-const patchBody = z
-  .object({
-    displayName: displayNameSchema.optional(),
-    avatarPath: avatarPathSchema.optional(),
-  })
-  .refine((value) => value.displayName !== undefined || value.avatarPath !== undefined, {
-    message: 'provide displayName or avatarPath',
-  });
+function patchBodyFor(userId: string) {
+  return z
+    .object({
+      displayName: displayNameSchema.optional(),
+      avatarPath: avatarPathSchemaFor(userId).optional(),
+    })
+    .refine((value) => value.displayName !== undefined || value.avatarPath !== undefined, {
+      message: 'provide displayName or avatarPath',
+    });
+}
 
 /**
  * Account deletion requires an explicit confirmation value.
@@ -103,7 +127,10 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
   });
 
   app.patch('/me', { preHandler: requireAuth }, async (request, reply) => {
-    const parsed = patchBody.safeParse(request.body);
+    // The user is read before the body is parsed: the avatar shape is anchored
+    // to the caller's own id, so the schema is built per request.
+    const user = authenticatedUser(request);
+    const parsed = patchBodyFor(user.id).safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, parsed.error);
 
     // Built explicitly rather than passed through, so an absent field stays
@@ -113,7 +140,6 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
     if (parsed.data.displayName !== undefined) changes.displayName = parsed.data.displayName;
     if (parsed.data.avatarPath !== undefined) changes.avatarPath = parsed.data.avatarPath;
 
-    const user = authenticatedUser(request);
     const account = await accountReadModel.updateProfile(user.id, changes);
 
     reply.header('cache-control', NO_STORE);

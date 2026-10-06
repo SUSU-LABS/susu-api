@@ -335,16 +335,66 @@ describe('PATCH /api/v1/me', () => {
 
   it('does not write a field the caller did not mention', async () => {
     const { app, readModel } = await harness();
+    const path = `users/${USER_ID}/avatar/${'a'.repeat(32)}.png`;
     await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: path },
+    });
+
+    expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, {
+      avatarPath: path,
+    });
+  });
+
+  it('rejects an avatar path that does not match the caller-shaped constraint', async () => {
+    const { app, readModel } = await harness();
+    const response = await app.inject({
       method: 'PATCH',
       url: '/api/v1/me',
       headers: AUTH,
       payload: { avatarPath: 'users/abc/avatar/x.webp' },
     });
 
-    expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, {
-      avatarPath: 'users/abc/avatar/x.webp',
+    // users/abc/... can never satisfy the DB shape for this caller, so the
+    // route refuses it: the constraint is never the first line of refusal.
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { error: string; details: { path: string }[] };
+    expect(body.error).toBe('invalid_request');
+    expect(body.details[0]?.path).toBe('avatarPath');
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('rejects an avatar path shaped for a different user', async () => {
+    const { app, readModel } = await harness();
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: `users/${OTHER_ID}/avatar/${'b'.repeat(32)}.png` },
     });
+
+    expect(response.statusCode).toBe(400);
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('rejects an avatar path with a bad hash or extension', async () => {
+    const { app } = await harness();
+    for (const bad of [
+      `users/${USER_ID}/avatar/${'z'.repeat(32)}.png`, // not hex
+      `users/${USER_ID}/avatar/${'c'.repeat(31)}.png`, // short hash
+      `users/${USER_ID}/avatar/${'c'.repeat(32)}.gif`, // bad extension
+      `users/${USER_ID}/avatar/${'c'.repeat(32)}.PNG`, // uppercase extension
+    ]) {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/me',
+        headers: AUTH,
+        payload: { avatarPath: bad },
+      });
+      expect(response.statusCode).toBe(400);
+    }
   });
 
   it('rejects an empty body', async () => {

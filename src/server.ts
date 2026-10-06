@@ -223,11 +223,23 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   app.setErrorHandler(async (error: FastifyError, request, reply) => {
     request.log.error({ err: error }, 'request failed');
 
+    // A check-constraint violation (Postgres 23514) means the request itself
+    // was invalid, even when route validation missed it. The database is never
+    // the first line of refusal, but a missed check is still a 400, not a 500.
     // Never surface internal error details to clients.
-    const statusCode = error.statusCode && error.statusCode < 500 ? error.statusCode : 500;
-    await reply.code(statusCode).send({
-      error: statusCode === 500 ? 'internal_error' : error.code || 'request_error',
-    });
+    const isCheckViolation = (error as { code?: unknown }).code === '23514';
+    const statusCode = isCheckViolation
+      ? 400
+      : error.statusCode && error.statusCode < 500
+        ? error.statusCode
+        : 500;
+    const code =
+      statusCode === 500
+        ? 'internal_error'
+        : isCheckViolation
+          ? 'invalid_request'
+          : error.code || 'request_error';
+    await reply.code(statusCode).send({ error: code });
   });
 
   // Started only when the store was not injected, which is the same condition as
