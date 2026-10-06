@@ -333,17 +333,32 @@ describe('PATCH /api/v1/me', () => {
     expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, { displayName: null });
   });
 
-  it('does not write a field the caller did not mention', async () => {
+  it('rejects an avatar path that violates the DB constraint', async () => {
     const { app, readModel } = await harness();
-    await app.inject({
+    const response = await app.inject({
       method: 'PATCH',
       url: '/api/v1/me',
       headers: AUTH,
       payload: { avatarPath: 'users/abc/avatar/x.webp' },
     });
 
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('invalid_request');
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('accepts a valid avatar path matching the DB constraint', async () => {
+    const { app, readModel } = await harness();
+    const validPath = `users/${USER_ID}/avatar/${'0'.repeat(32)}.webp`;
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: validPath },
+    });
+
     expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, {
-      avatarPath: 'users/abc/avatar/x.webp',
+      avatarPath: validPath,
     });
   });
 

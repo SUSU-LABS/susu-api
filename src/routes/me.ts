@@ -106,6 +106,25 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
     const parsed = patchBody.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, parsed.error);
 
+    const user = authenticatedUser(request);
+
+    // Validate avatarPath against the DB constraint shape:
+    // users/<user_id>/avatar/[0-9a-f]{32}\.(png|jpe?g|webp)
+    // This catches invalid paths before they hit the DB check constraint,
+    // returning 400 instead of a generic 500.
+    if (parsed.data.avatarPath !== undefined && parsed.data.avatarPath !== null) {
+      const avatarRegex = new RegExp(`^users/${user.id}/avatar/[0-9a-f]{32}\\.(png|jpe?g|webp)$`);
+      if (!avatarRegex.test(parsed.data.avatarPath)) {
+        return reply.code(400).send({
+          error: 'invalid_request',
+          details: [{
+            path: 'avatarPath',
+            message: 'must match the pattern users/<your user id>/avatar/<32 hex chars>.<png|jpg|jpeg|webp>',
+          }],
+        });
+      }
+    }
+
     // Built explicitly rather than passed through, so an absent field stays
     // absent instead of being written as `undefined` and clearing a value the
     // caller never mentioned.
@@ -113,7 +132,6 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
     if (parsed.data.displayName !== undefined) changes.displayName = parsed.data.displayName;
     if (parsed.data.avatarPath !== undefined) changes.avatarPath = parsed.data.avatarPath;
 
-    const user = authenticatedUser(request);
     const account = await accountReadModel.updateProfile(user.id, changes);
 
     reply.header('cache-control', NO_STORE);
