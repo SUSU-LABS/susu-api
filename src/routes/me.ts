@@ -49,28 +49,31 @@ const displayNameSchema = z
   .nullable();
 
 /**
- * The avatar is stored as an object key, never a URL, and the key must stay a
- * relative path with no traversal. The upload path lands in a later phase; the
- * column is validated now so a stored value cannot become a path that resolves
- * outside the user's own prefix.
+ * The avatar is stored as an object key, never a URL. Migration 0004_profile_images.sql
+ * enforces the DB constraint `profiles_avatar_path_shape`:
+ * `users/<user_id>/avatar/[0-9a-f]{32}.(png|jpe?g|webp)`.
+ * We validate this schema anchored to the authenticated user's ID so that the database
+ * constraint is never the first line of refusal.
  */
-const avatarPathSchema = z
-  .string()
-  .trim()
-  .min(1, 'must not be empty')
-  .max(255, 'must be 255 characters or fewer')
-  .refine((value) => !value.startsWith('/'), 'must be a relative object key')
-  .refine((value) => !value.includes('..'), 'must not contain ".."')
-  .nullable();
+function avatarPathSchemaFor(userId: string) {
+  const pattern = new RegExp(`^users/${userId}/avatar/[0-9a-f]{32}\\.(png|jpe?g|webp)$`);
+  return z
+    .string()
+    .trim()
+    .regex(pattern, `must match users/${userId}/avatar/<32-hex-hash>.(png|jpg|jpeg|webp)`)
+    .nullable();
+}
 
-const patchBody = z
-  .object({
-    displayName: displayNameSchema.optional(),
-    avatarPath: avatarPathSchema.optional(),
-  })
-  .refine((value) => value.displayName !== undefined || value.avatarPath !== undefined, {
-    message: 'provide displayName or avatarPath',
-  });
+function patchBodySchema(userId: string) {
+  return z
+    .object({
+      displayName: displayNameSchema.optional(),
+      avatarPath: avatarPathSchemaFor(userId).optional(),
+    })
+    .refine((value) => value.displayName !== undefined || value.avatarPath !== undefined, {
+      message: 'provide displayName or avatarPath',
+    });
+}
 
 /**
  * Account deletion requires an explicit confirmation value.
@@ -103,7 +106,8 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
   });
 
   app.patch('/me', { preHandler: requireAuth }, async (request, reply) => {
-    const parsed = patchBody.safeParse(request.body);
+    const user = authenticatedUser(request);
+    const parsed = patchBodySchema(user.id).safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, parsed.error);
 
     // Built explicitly rather than passed through, so an absent field stays
@@ -113,11 +117,24 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
     if (parsed.data.displayName !== undefined) changes.displayName = parsed.data.displayName;
     if (parsed.data.avatarPath !== undefined) changes.avatarPath = parsed.data.avatarPath;
 
-    const user = authenticatedUser(request);
-    const account = await accountReadModel.updateProfile(user.id, changes);
-
-    reply.header('cache-control', NO_STORE);
-    return reply.send({ data: account });
+    try {
+      const account = await accountReadModel.updateProfile(user.id, changes);
+      reply.header('cache-control', NO_STORE);
+      return reply.send({ data: account });
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as { code: string }).code === '23514'
+      ) {
+        return reply.code(400).send({
+          error: 'invalid_request',
+          details: [{ path: 'avatarPath', message: 'violates profile avatar path constraint' }],
+        });
+      }
+      throw error;
+    }
   });
 
   /**

@@ -223,6 +223,20 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   app.setErrorHandler(async (error: FastifyError, request, reply) => {
     request.log.error({ err: error }, 'request failed');
 
+    // Map Postgres check-constraint violations (23514) to 400 invalid_request
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      (error as { code: string }).code === '23514'
+    ) {
+      await reply.code(400).send({
+        error: 'invalid_request',
+        details: [{ path: 'avatarPath', message: 'violates profile avatar path constraint' }],
+      });
+      return;
+    }
+
     // Never surface internal error details to clients.
     const statusCode = error.statusCode && error.statusCode < 500 ? error.statusCode : 500;
     await reply.code(statusCode).send({

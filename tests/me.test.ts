@@ -335,16 +335,48 @@ describe('PATCH /api/v1/me', () => {
 
   it('does not write a field the caller did not mention', async () => {
     const { app, readModel } = await harness();
+    const validAvatar = `users/${USER_ID}/avatar/${'a'.repeat(32)}.webp`;
     await app.inject({
       method: 'PATCH',
       url: '/api/v1/me',
       headers: AUTH,
-      payload: { avatarPath: 'users/abc/avatar/x.webp' },
+      payload: { avatarPath: validAvatar },
     });
 
     expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, {
-      avatarPath: 'users/abc/avatar/x.webp',
+      avatarPath: validAvatar,
     });
+  });
+
+  it('rejects an avatar path belonging to another user id', async () => {
+    const { app, readModel } = await harness();
+    const otherId = '22222222-2222-2222-2222-222222222222';
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: `users/${otherId}/avatar/${'a'.repeat(32)}.webp` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('invalid_request');
+    expect(response.json().details[0].path).toBe('avatarPath');
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('rejects an avatar path with a malformed hash or extension', async () => {
+    const { app, readModel } = await harness();
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: `users/${USER_ID}/avatar/not-a-hash.gif` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('invalid_request');
+    expect(response.json().details[0].path).toBe('avatarPath');
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
   });
 
   it('rejects an empty body', async () => {
