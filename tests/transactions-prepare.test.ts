@@ -93,6 +93,7 @@ type HarnessOptions = {
   knownGroup?: string;
   /** Whether a just-created address was registered before the index caught up. */
   registered?: boolean;
+  verify?: TokenVerifier;
 };
 
 async function harness(options: HarnessOptions = {}): Promise<{
@@ -100,9 +101,10 @@ async function harness(options: HarnessOptions = {}): Promise<{
   simulate: ReturnType<typeof vi.fn>;
   groupExists: ReturnType<typeof vi.fn>;
   isRegistered: ReturnType<typeof vi.fn>;
+  verify: ReturnType<typeof vi.fn>;
 }> {
   const { buildServer } = await import('../src/server');
-  const verify = vi.fn(async () => ({ id: USER_ID, email: 'ada@example.com' }));
+  const verify = vi.fn(options.verify ?? (async () => ({ id: USER_ID, email: 'ada@example.com' })));
 
   const simulate = vi.fn(options.simulate ?? (async () => simulationSuccess(150)));
   const groupExists = vi.fn(async (contractId: string) => contractId === options.knownGroup);
@@ -127,7 +129,7 @@ async function harness(options: HarnessOptions = {}): Promise<{
   });
   built.push(app);
 
-  return { app, simulate, groupExists, isRegistered };
+  return { app, simulate, groupExists, isRegistered, verify };
 }
 
 describe('POST /api/v1/transactions/prepare', () => {
@@ -202,6 +204,76 @@ describe('POST /api/v1/transactions/prepare', () => {
     // The refusal is about the caller's budget, not about the envelope: the
     // calls that were allowed all reached the simulator, and the one that was
     // refused did not.
+    expect(simulate).toHaveBeenCalledTimes(20);
+  });
+
+  it('refuses rotating-token callers after the budget and stops invoking token verification', async () => {
+    const { app, verify, simulate } = await harness({ knownGroup: GROUP });
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/transactions/prepare',
+        headers: { authorization: `Bearer rotating-token-${attempt}` },
+        payload: { transactionXdr: envelopeXdr(GROUP, 'contribute') },
+      });
+      statuses.push(response.statusCode);
+    }
+
+    expect(statuses.slice(0, 20).every((status) => status === 200)).toBe(true);
+    expect(statuses[20]).toBe(429);
+
+    // Token verification and simulation must be invoked at most N times (20)
+    expect(verify).toHaveBeenCalledTimes(20);
+    expect(simulate).toHaveBeenCalledTimes(20);
+  });
+
+  it('refuses unauthenticated callers sending distinct Bearer values after the budget', async () => {
+    const unauthVerify = vi.fn(async () => undefined);
+    const { app, simulate } = await harness({
+      knownGroup: GROUP,
+      verify: unauthVerify as unknown as TokenVerifier,
+    });
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/transactions/prepare',
+        headers: { authorization: `Bearer junk-token-${attempt}` },
+        payload: { transactionXdr: envelopeXdr(GROUP, 'contribute') },
+      });
+      statuses.push(response.statusCode);
+    }
+
+    // The first 20 requests are refused with 401 because tokens are invalid
+    expect(statuses.slice(0, 20).every((status) => status === 401)).toBe(true);
+    // The 21st request is refused with 429 because the budget is exhausted
+    expect(statuses[20]).toBe(429);
+
+    // verifyToken must be invoked at most 20 times (never for the 21st request)
+    expect(unauthVerify).toHaveBeenCalledTimes(20);
+    expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it('refuses an authenticated user exceeding their budget across distinct IP addresses', async () => {
+    const { app, simulate } = await harness({ knownGroup: GROUP });
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/transactions/prepare',
+        headers: AUTH,
+        remoteAddress: `198.51.100.${attempt + 1}`,
+        payload: { transactionXdr: envelopeXdr(GROUP, 'contribute') },
+      });
+      statuses.push(response.statusCode);
+    }
+
+    expect(statuses.slice(0, 20).every((status) => status === 200)).toBe(true);
+    expect(statuses[20]).toBe(429);
     expect(simulate).toHaveBeenCalledTimes(20);
   });
 
