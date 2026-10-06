@@ -54,23 +54,42 @@ const displayNameSchema = z
  * column is validated now so a stored value cannot become a path that resolves
  * outside the user's own prefix.
  */
-const avatarPathSchema = z
-  .string()
-  .trim()
-  .min(1, 'must not be empty')
-  .max(255, 'must be 255 characters or fewer')
-  .refine((value) => !value.startsWith('/'), 'must be a relative object key')
-  .refine((value) => !value.includes('..'), 'must not contain ".."')
-  .nullable();
+/**
+ * The exact shape the `profiles_avatar_path_shape` check constraint enforces
+ * (see drizzle/0004_profile_images.sql), anchored to the caller's own user id:
+ * `users/<their id>/avatar/<32 lowercase hex>.<png|jpg|jpeg|webp>`.
+ *
+ * Validating it here, at the edge, is what makes the database constraint the
+ * last line of refusal rather than the first: a path that would violate the
+ * constraint is answered with a 400 carrying field detail, instead of surfacing
+ * as a generic 500 from the driver.
+ */
+const avatarPathShape = (userId: string): RegExp =>
+  new RegExp(`^users/${userId}/avatar/[0-9a-f]{32}\\.(png|jpe?g|webp)$`);
 
-const patchBody = z
-  .object({
-    displayName: displayNameSchema.optional(),
-    avatarPath: avatarPathSchema.optional(),
-  })
-  .refine((value) => value.displayName !== undefined || value.avatarPath !== undefined, {
-    message: 'provide displayName or avatarPath',
-  });
+const avatarPathSchema = (userId: string) =>
+  z
+    .string()
+    .trim()
+    .min(1, 'must not be empty')
+    .max(255, 'must be 255 characters or fewer')
+    .refine((value) => !value.startsWith('/'), 'must be a relative object key')
+    .refine((value) => !value.includes('..'), 'must not contain ".."')
+    .refine(
+      (value) => avatarPathShape(userId).test(value),
+      "must be an avatar object key under this account's own prefix",
+    )
+    .nullable();
+
+const patchBody = (userId: string) =>
+  z
+    .object({
+      displayName: displayNameSchema.optional(),
+      avatarPath: avatarPathSchema(userId).optional(),
+    })
+    .refine((value) => value.displayName !== undefined || value.avatarPath !== undefined, {
+      message: 'provide displayName or avatarPath',
+    });
 
 /**
  * Account deletion requires an explicit confirmation value.
@@ -103,7 +122,10 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
   });
 
   app.patch('/me', { preHandler: requireAuth }, async (request, reply) => {
-    const parsed = patchBody.safeParse(request.body);
+    // The avatar-path rule is anchored to the verified token's subject, so the
+    // schema is built per request rather than once at module scope.
+    const user = authenticatedUser(request);
+    const parsed = patchBody(user.id).safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, parsed.error);
 
     // Built explicitly rather than passed through, so an absent field stays
@@ -113,7 +135,6 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
     if (parsed.data.displayName !== undefined) changes.displayName = parsed.data.displayName;
     if (parsed.data.avatarPath !== undefined) changes.avatarPath = parsed.data.avatarPath;
 
-    const user = authenticatedUser(request);
     const account = await accountReadModel.updateProfile(user.id, changes);
 
     reply.header('cache-control', NO_STORE);

@@ -335,16 +335,15 @@ describe('PATCH /api/v1/me', () => {
 
   it('does not write a field the caller did not mention', async () => {
     const { app, readModel } = await harness();
+    const avatarPath = `users/${USER_ID}/avatar/${'a'.repeat(32)}.webp`;
     await app.inject({
       method: 'PATCH',
       url: '/api/v1/me',
       headers: AUTH,
-      payload: { avatarPath: 'users/abc/avatar/x.webp' },
+      payload: { avatarPath },
     });
 
-    expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, {
-      avatarPath: 'users/abc/avatar/x.webp',
-    });
+    expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, { avatarPath });
   });
 
   it('rejects an empty body', async () => {
@@ -408,6 +407,56 @@ describe('PATCH /api/v1/me', () => {
     });
 
     expect(response.statusCode).toBe(400);
+  });
+
+  it('rejects an avatar path that does not match the stored-object shape', async () => {
+    // `users/abc/avatar/x.webp` passes the traversal checks but violates the
+    // `profiles_avatar_path_shape` constraint. The route must refuse it with a
+    // 400 carrying field detail — the constraint must never be the first line
+    // of refusal, surfacing as a generic 500.
+    const { app, readModel } = await harness();
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: 'users/abc/avatar/x.webp' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('invalid_request');
+    expect(response.json().details).toContainEqual(expect.objectContaining({ path: 'avatarPath' }));
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it("rejects an avatar path under another user's prefix", async () => {
+    // The constraint anchors the path to the row's own user_id; the route check
+    // anchors it to the verified token's subject, so a well-formed path that
+    // belongs to somebody else is still a 400.
+    const { app, readModel } = await harness();
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: `users/${OTHER_ID}/avatar/${'b'.repeat(32)}.png` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toBe('invalid_request');
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it("accepts an avatar path under the caller's own prefix", async () => {
+    const { app, readModel } = await harness();
+    const avatarPath = `users/${USER_ID}/avatar/${'c'.repeat(32)}.jpeg`;
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, { avatarPath });
   });
 });
 
