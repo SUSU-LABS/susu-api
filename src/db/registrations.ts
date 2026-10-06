@@ -121,10 +121,6 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         .where(eq(groupRegistrations.contractId, contractId));
 
       const alreadyMine = existing[0]?.registeredBy === userId;
-      if (!alreadyMine && (await countLive(userId)) >= MAX_LIVE_REGISTRATIONS) {
-        return { outcome: 'too_many' } as const;
-      }
-
       if (alreadyMine) {
         const updated = await db
           .update(groupRegistrations)
@@ -147,21 +143,35 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         } as const;
       }
 
-      // Another account's claim, or none. `onConflictDoNothing` makes the insert
-      // safe either way: if the address is already claimed, nothing changes — the
-      // existing holder keeps it and this account learns it is registered.
-      const inserted = await db
-        .insert(groupRegistrations)
-        .values({ contractId, registeredBy: userId, expiresAt })
-        .onConflictDoNothing({ target: groupRegistrations.contractId })
-        .returning({ expiresAt: groupRegistrations.expiresAt });
+      // Another account's claim, or none.
+      // Enforce the cap atomically with `INSERT ... SELECT ... WHERE count < MAX`.
+      // This prevents race conditions where concurrent calls both observe count < MAX and both insert.
+      const insertResult = (await db.execute(sql`
+        INSERT INTO "group_registrations" ("contract_id", "registered_by", "expires_at")
+        SELECT ${contractId}, ${userId}, ${expiresAt}
+        WHERE (
+          SELECT count(*)::int
+          FROM "group_registrations"
+          WHERE "registered_by" = ${userId}
+            AND "expires_at" > now()
+        ) < ${MAX_LIVE_REGISTRATIONS}
+        ON CONFLICT ("contract_id") DO NOTHING
+        RETURNING "expires_at" AS "expiresAt"
+      `)) as unknown as { rows: Array<{ expiresAt: Date | string }> };
 
-      if (inserted[0] !== undefined) {
+      if (insertResult.rows[0] !== undefined) {
+        const rowExpires = insertResult.rows[0].expiresAt;
+        const iso = rowExpires instanceof Date ? rowExpires.toISOString() : new Date(rowExpires).toISOString();
         return {
           outcome: 'registered',
           contractId,
-          expiresAt: inserted[0].expiresAt.toISOString(),
+          expiresAt: iso,
         } as const;
+      }
+
+      // No row was inserted: either the user is at/over the cap, or the address is already claimed by someone else.
+      if ((await countLive(userId)) >= MAX_LIVE_REGISTRATIONS) {
+        return { outcome: 'too_many' } as const;
       }
 
       const holder = await db

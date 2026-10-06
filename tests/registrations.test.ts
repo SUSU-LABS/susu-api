@@ -165,6 +165,24 @@ describe('createRegistrationStore.register', () => {
     expect(other.outcome).toBe('registered');
   });
 
+  it('enforces the cap atomically under parallel registrations', async () => {
+    for (let index = 0; index < MAX_LIVE_REGISTRATIONS - 1; index += 1) {
+      const result = await store.register({
+        contractId: distinctContractId(index),
+        userId: USER_ONE,
+      });
+      expect(result.outcome).toBe('registered');
+    }
+
+    const [res1, res2] = await Promise.all([
+      store.register({ contractId: distinctContractId(MAX_LIVE_REGISTRATIONS - 1), userId: USER_ONE }),
+      store.register({ contractId: distinctContractId(MAX_LIVE_REGISTRATIONS), userId: USER_ONE }),
+    ]);
+
+    const outcomes = [res1.outcome, res2.outcome].sort();
+    expect(outcomes).toEqual(['registered', 'too_many']);
+  });
+
   it('does not count an expired claim against the cap', async () => {
     for (let index = 0; index < MAX_LIVE_REGISTRATIONS; index += 1) {
       await store.register({ contractId: distinctContractId(index), userId: USER_ONE });
