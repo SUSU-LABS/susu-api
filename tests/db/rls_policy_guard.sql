@@ -1085,6 +1085,26 @@ end
 $$;
 
 do $$
+declare refused boolean := false;
+begin
+  -- A path under the user's *own* prefix but outside `avatar/`. The ownership
+  -- check alone would permit it, so this is the assertion that the policy is
+  -- scoped to the segment the app actually uses rather than the whole prefix.
+  begin
+    insert into storage.objects (bucket_id, name)
+    values ('profile-images', 'users/11111111-1111-1111-1111-111111111111/other/99999999999999999999999999999999.png');
+  exception when insufficient_privilege then
+    refused := true;
+  end;
+
+  if not refused then
+    raise exception 'a user uploaded outside the avatar/ segment under their own prefix';
+  end if;
+  raise notice 'ok: a user cannot write outside the avatar/ segment';
+end
+$$;
+
+do $$
 declare removed int; moved int;
 begin
   -- Deleting and renaming someone else's object affect zero rows rather than
