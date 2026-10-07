@@ -5,6 +5,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import {
   createTransactionReadModel,
   isTransactionHash,
+  MAX_RECEIPT_EVENTS,
   normaliseTransactionHash,
 } from '../src/db/transactions';
 import type * as schema from '../src/db/schema';
@@ -69,7 +70,7 @@ describe('normaliseTransactionHash', () => {
 });
 
 describe('getReceipt', () => {
-  it('queries by tx hash, ordered by event index', async () => {
+  it('queries by tx hash, ordered by event index, bounded by the cap', async () => {
     const { db, execute } = stubDb([]);
 
     await createTransactionReadModel(db).getReceipt(TX_HASH);
@@ -80,13 +81,40 @@ describe('getReceipt', () => {
     // The order is what makes a receipt readable and stable; without it a
     // two-event transaction could be reported fee-first.
     expect(query.sql).toContain('order by event_index');
-    expect(query.params).toEqual([TX_HASH]);
+    // Bounded so one transaction cannot produce an arbitrarily large body. The
+    // limit is one past the cap so truncation can be detected.
+    expect(query.sql).toContain('limit $2');
+    expect(query.params).toEqual([TX_HASH, MAX_RECEIPT_EVENTS + 1]);
   });
 
   it('returns undefined when the index has no events for the transaction', async () => {
     const { db } = stubDb([]);
 
     expect(await createTransactionReadModel(db).getReceipt(TX_HASH)).toBeUndefined();
+  });
+
+  it('caps the events and flags a truncated receipt', async () => {
+    const events = Array.from({ length: MAX_RECEIPT_EVENTS + 1 }, (_unused, index) =>
+      row({ event_identity: `${TX_HASH}:${index}`, event_index: String(index) }),
+    );
+    const { db } = stubDb(events);
+
+    const receipt = await createTransactionReadModel(db).getReceipt(TX_HASH);
+
+    expect(receipt?.events).toHaveLength(MAX_RECEIPT_EVENTS);
+    expect(receipt?.truncated).toBe(true);
+  });
+
+  it('does not flag a receipt at or under the cap', async () => {
+    const events = Array.from({ length: MAX_RECEIPT_EVENTS }, (_unused, index) =>
+      row({ event_identity: `${TX_HASH}:${index}`, event_index: String(index) }),
+    );
+    const { db } = stubDb(events);
+
+    const receipt = await createTransactionReadModel(db).getReceipt(TX_HASH);
+
+    expect(receipt?.events).toHaveLength(MAX_RECEIPT_EVENTS);
+    expect(receipt?.truncated).toBe(false);
   });
 
   it('builds a receipt from every event, in the order given', async () => {
