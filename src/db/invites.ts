@@ -13,10 +13,14 @@
  *      records; the unique key on the pair makes the second attempt a no-op
  *      rather than a second increment.
  *
- * So the whole redemption is one transaction: the invite row is locked, the
- * existing redemption is looked for, capacity is checked, and the redemption row
- * and the counter are written together. The lock is what makes the capacity check
- * meaningful; the unique index is what makes the redemption idempotent.
+ * So the write part of the redemption is one transaction: the invite row is
+ * locked, the existing redemption is looked for, capacity is checked, and the
+ * redemption row and the counter are written together. The lock is what makes
+ * the capacity check meaningful; the unique index is what makes the redemption
+ * idempotent. The `shouldClaim` check is resolved *before* the transaction,
+ * because it reads the read model over the shared pool: awaiting it while holding
+ * the invite lock would hold that lock across a network round trip and let
+ * concurrent redemptions exhaust the pool.
  *
  * The chain is still the authority on who may join and how large a group is.
  * This endpoint resolves a code and claims a use so that a limited invite is not
@@ -139,6 +143,58 @@ export function createInviteStore(db: Database): InviteStore {
     },
 
     async redeem({ code, userId, shouldClaim }) {
+      // Resolve the invite before the transaction, so the `shouldClaim` read can
+      // happen with no lock held. `shouldClaim` is wired to the group's status in
+      // the read model (`src/routes/invites.ts`), which is another query on the
+      // shared pool (`src/db/client.ts`, `max: 10`). Awaiting it while holding the
+      // invite row lock kept that lock across a network round trip: a slow status
+      // read blocked every other redemption of the same code, and enough of them
+      // could exhaust the pool while holding locks.
+      const [invite] = await db
+        .select()
+        .from(inviteLinks)
+        .where(eq(inviteLinks.code, code));
+
+      if (invite === undefined) return { outcome: 'not_found' } as const;
+      if (invite.revokedAt !== null) return { outcome: 'revoked' } as const;
+      if (invite.expiresAt !== null && invite.expiresAt.getTime() <= Date.now()) {
+        return { outcome: 'expired' } as const;
+      }
+
+      // The code identifies the group, which is the point of it: an invite link
+      // carries the code and nothing else, so a lookup that needed the contract
+      // address as well could never be satisfied by the link. `code` is unique,
+      // so this is a single row. The group never changes for a given code, so the
+      // value read here is the one the transaction reports later.
+      const groupContractId = invite.groupContractId;
+
+      // A member who already redeemed is idempotent and is not asked again: the
+      // status check only concerns a first redemption. This lookup is advisory —
+      // the authoritative check happens under the lock — but it is what keeps the
+      // courtesy callback from firing for a returning member.
+      const [already] = await db
+        .select({ id: inviteRedemptions.id })
+        .from(inviteRedemptions)
+        .where(
+          and(eq(inviteRedemptions.inviteId, invite.id), eq(inviteRedemptions.userId, userId)),
+        )
+        .limit(1);
+
+      if (already !== undefined) {
+        return {
+          outcome: 'redeemed',
+          inviteId: invite.id,
+          groupContractId,
+          claimed: true,
+        } as const;
+      }
+
+      // Asked before anything is written, so a group that cannot be joined leaves
+      // the invite exactly as it was. It reads the read model rather than this
+      // transaction's tables, so it neither depends on nor extends the lock — and
+      // it now runs before the lock is taken at all.
+      const claim = shouldClaim === undefined ? true : await shouldClaim(groupContractId);
+
       return db.transaction(async (tx) => {
         // `for update` is the whole reason this is a transaction. Without it the
         // capacity check below is advisory: two concurrent joins would both read
@@ -149,59 +205,53 @@ export function createInviteStore(db: Database): InviteStore {
           .where(eq(inviteLinks.code, code))
           .for('update');
 
-        const invite = locked[0];
-        if (invite === undefined) return { outcome: 'not_found' } as const;
-        if (invite.revokedAt !== null) return { outcome: 'revoked' } as const;
-        if (invite.expiresAt !== null && invite.expiresAt.getTime() <= Date.now()) {
+        // Re-read under the lock so a revocation or expiry that landed between the
+        // pre-read and this lock is still honoured, and so the capacity check sees
+        // the freshest counter.
+        const row = locked[0];
+        if (row === undefined) return { outcome: 'not_found' } as const;
+        if (row.revokedAt !== null) return { outcome: 'revoked' } as const;
+        if (row.expiresAt !== null && row.expiresAt.getTime() <= Date.now()) {
           return { outcome: 'expired' } as const;
         }
-
-        // The code identifies the group, which is the point of it: an invite link
-        // carries the code and nothing else, so a lookup that needed the contract
-        // address as well could never be satisfied by the link. `code` is unique,
-        // so this is a single row.
-        const groupContractId = invite.groupContractId;
 
         // Checked before capacity, so a member who already redeemed is idempotent
         // even when the invite has since filled up. Reporting "exhausted" to
         // someone who is already in would be true about the invite and wrong
-        // about their situation.
+        // about their situation. Re-checked under the lock because a concurrent
+        // redemption of the same code by the same user may have committed between
+        // the pre-read and this lock.
         const [existing] = await tx
           .select({ id: inviteRedemptions.id })
           .from(inviteRedemptions)
           .where(
-            and(eq(inviteRedemptions.inviteId, invite.id), eq(inviteRedemptions.userId, userId)),
+            and(eq(inviteRedemptions.inviteId, row.id), eq(inviteRedemptions.userId, userId)),
           )
           .limit(1);
 
         if (existing !== undefined) {
           return {
             outcome: 'redeemed',
-            inviteId: invite.id,
+            inviteId: row.id,
             groupContractId,
             claimed: true,
           } as const;
         }
 
-        // Asked before capacity and before anything is written, so a group that
-        // cannot be joined leaves the invite exactly as it was. Awaited inside the
-        // transaction because the answer is only needed here; it reads the read
-        // model rather than this transaction's tables, so it neither depends on
-        // nor extends the lock.
-        if (shouldClaim !== undefined && !(await shouldClaim(groupContractId))) {
+        if (!claim) {
           return {
             outcome: 'redeemed',
-            inviteId: invite.id,
+            inviteId: row.id,
             groupContractId,
             claimed: false,
           } as const;
         }
 
-        if (invite.maxUses !== null && invite.uses >= invite.maxUses) {
+        if (row.maxUses !== null && row.uses >= row.maxUses) {
           return { outcome: 'exhausted' } as const;
         }
 
-        await tx.insert(inviteRedemptions).values({ inviteId: invite.id, userId });
+        await tx.insert(inviteRedemptions).values({ inviteId: row.id, userId });
 
         // Incremented in SQL rather than from the value read above, so the
         // update cannot write back a stale count if anything else has touched
@@ -209,11 +259,11 @@ export function createInviteStore(db: Database): InviteStore {
         await tx
           .update(inviteLinks)
           .set({ uses: sql`${inviteLinks.uses} + 1` })
-          .where(eq(inviteLinks.id, invite.id));
+          .where(eq(inviteLinks.id, row.id));
 
         return {
           outcome: 'redeemed',
-          inviteId: invite.id,
+          inviteId: row.id,
           groupContractId,
           claimed: true,
         } as const;
