@@ -244,3 +244,77 @@ describe('what the claim check is told', () => {
     expect(seen).not.toBe(OTHER_CONTRACT_ID);
   });
 });
+
+describe('the claim check no longer runs under the row lock', () => {
+  /**
+   * Records each time the store opens a transaction, so a test can prove the
+   * claim decision's I/O finished before the transaction — and with it the
+   * invite row lock — ever opened.
+   */
+  function withTransactionSpy(db: TestDb['db'], order: string[]): TestDb['db'] {
+    const spy = Object.create(
+      Object.getPrototypeOf(db),
+      Object.getOwnPropertyDescriptors(db),
+    ) as TestDb['db'];
+    const original = (db.transaction as unknown as (...args: unknown[]) => unknown).bind(db);
+    Object.defineProperty(spy, 'transaction', {
+      value: (...args: unknown[]) => {
+        order.push('transaction');
+        return original(...args);
+      },
+      writable: true,
+      configurable: true,
+    });
+    return spy;
+  }
+
+  it('resolves shouldClaim before the transaction opens', async () => {
+    const invite = await seedInvite(3);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const order: string[] = [];
+    const observedStore = createInviteStore(withTransactionSpy(testDb.db, order));
+
+    const outcome = await observedStore.redeem({
+      code: invite.code,
+      userId,
+      shouldClaim: async () => {
+        order.push('shouldClaim');
+        return true;
+      },
+    });
+
+    // The status read is the I/O the issue is about. If it resolved after the
+    // transaction opened, the row lock would be held across that network round
+    // trip; resolving it first is the whole fix.
+    expect(order).toEqual(['shouldClaim', 'transaction']);
+    expect(outcome).toMatchObject({ outcome: 'redeemed', claimed: true });
+  });
+
+  it('a burst of concurrent redemptions completes without deadlock', async () => {
+    const invite = await seedInvite(null);
+    const users: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const userId = nextUser();
+      await testDb.createUser(userId);
+      users.push(userId);
+    }
+
+    // Simulates the slow group-status read from the issue. Before the fix this
+    // I/O ran while holding the row lock, so every redemption queued behind the
+    // previous one's status read.
+    const slowClaim = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return true;
+    };
+
+    const outcomes = await Promise.all(
+      users.map((userId) => store.redeem({ code: invite.code, userId, shouldClaim: slowClaim })),
+    );
+
+    expect(outcomes.every((o) => o.outcome === 'redeemed' && o.claimed)).toBe(true);
+    expect(await usesOf(invite.id)).toBe(users.length);
+    expect(await redemptionCount(invite.id)).toBe(users.length);
+  });
+});
