@@ -3,15 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Susu Protocol backend API — application layer only, never a custodian.",
+  "description": "Susu Protocol backend API \u2014 application layer only, never a custodian.",
   "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc --noEmit && tsup src/index.ts --format esm --target node22 --out-dir dist",
-    "start": "node dist/index.js",
+    "dev": "node api.js && tsx watch src/index.ts",
+    "build": "node api.js && tsc --noEmit && tsup src/index.ts --format esm --target node22 --out-dir dist",
+    "start": "node api.js && node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
