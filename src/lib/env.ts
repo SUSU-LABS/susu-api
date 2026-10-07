@@ -98,7 +98,17 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | undef
 
 function assertSecurityInvariants(env: Env): void {
   const claims = decodeJwtPayload(env.SUPABASE_SERVICE_ROLE_KEY);
-  if (claims && claims['role'] !== 'service_role') {
+  // Fail closed on an opaque key. A key that is not a decodable JWT cannot be
+  // shown to carry the service_role claim, so the only safe reading is that it
+  // is not a service-role key — accepting it would let a publishable or scoped
+  // key power the server-only paths.
+  if (claims === undefined) {
+    throw new Error(
+      'SUPABASE_SERVICE_ROLE_KEY is not a decodable JWT, so it cannot be verified as a ' +
+        'service_role token. Refusing to start with an unverifiable key in a server-only variable.',
+    );
+  }
+  if (claims['role'] !== 'service_role') {
     throw new Error(
       'SUPABASE_SERVICE_ROLE_KEY does not contain a service_role token. ' +
         'Refusing to start with a non-elevated key in a server-only variable.',

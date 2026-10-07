@@ -45,7 +45,7 @@ export type SupabaseAdminClient = {
   };
   storage: {
     from(bucket: string): {
-      list(path: string, options?: { limit?: number }): Promise<StorageListResult>;
+      list(path: string, options?: { limit?: number; offset?: number }): Promise<StorageListResult>;
       remove(paths: string[]): Promise<StorageRemoveResult>;
     };
   };
@@ -108,13 +108,23 @@ export type AccountDeleterOptions = {
 };
 
 /**
- * The largest number of avatar objects one account can have.
+ * The number of avatar objects fetched per page.
  *
- * The app keeps one photo per user: it removes the previous object when it
- * replaces one. The list call is bounded anyway, so a client that somehow
- * accumulated objects cannot turn account deletion into an unbounded scan.
+ * The app keeps one photo per user, but a client that somehow accumulated
+ * objects must not turn account deletion into an unbounded scan, so listing is
+ * paged.
  */
 const AVATAR_LIST_LIMIT = 100;
+
+/**
+ * A ceiling on how many objects one deletion will collect.
+ *
+ * Pagination alone terminates on a short page, but an adversarial or corrupt
+ * store could keep returning full pages forever. Once this many objects have
+ * been collected the cleanup stops and warns rather than looping without end.
+ * It is far above any real account, so reaching it is itself a signal.
+ */
+const MAX_AVATAR_OBJECTS = 1_000;
 
 async function removeProfileImages(
   client: SupabaseAdminClient,
@@ -124,21 +134,58 @@ async function removeProfileImages(
 ): Promise<void> {
   const prefix = `users/${userId}/avatar`;
 
-  const listing = await client.storage.from(bucket).list(prefix, { limit: AVATAR_LIST_LIMIT });
-  if (listing.error !== null || listing.data === null) {
-    onWarning(
-      `profile image cleanup could not list ${prefix}: ${listing.error?.message ?? 'no data'}`,
-    );
-    return;
+  // Pages are gathered before anything is removed: deleting as we page would
+  // shift the objects a later offset expects and skip the ones that moved down.
+  const paths: string[] = [];
+  let offset = 0;
+  let truncated = false;
+
+  while (true) {
+    const listing = await client.storage
+      .from(bucket)
+      .list(prefix, { limit: AVATAR_LIST_LIMIT, offset });
+    if (listing.error !== null || listing.data === null) {
+      onWarning(
+        `profile image cleanup could not list ${prefix}: ${listing.error?.message ?? 'no data'}`,
+      );
+      return;
+    }
+
+    for (const entry of listing.data) {
+      paths.push(`${prefix}/${entry.name}`);
+    }
+
+    if (listing.data.length < AVATAR_LIST_LIMIT) break;
+
+    offset += listing.data.length;
+    if (paths.length >= MAX_AVATAR_OBJECTS) {
+      truncated = true;
+      break;
+    }
   }
 
-  const paths = listing.data.map((entry) => `${prefix}/${entry.name}`);
   if (paths.length === 0) return;
 
-  const removed = await client.storage.from(bucket).remove(paths);
-  if (removed.error !== null) {
+  // Remove in pages rather than in one call: a failure in a later page still
+  // records how many objects were left behind, and a single oversized request
+  // is one the Storage API may reject outright.
+  let removed = 0;
+  for (let index = 0; index < paths.length; index += AVATAR_LIST_LIMIT) {
+    const page = paths.slice(index, index + AVATAR_LIST_LIMIT);
+    const result = await client.storage.from(bucket).remove(page);
+    if (result.error !== null) {
+      onWarning(
+        `profile image cleanup left ${paths.length - removed} object(s) in ${bucket}: ${result.error.message}`,
+      );
+      return;
+    }
+    removed += page.length;
+  }
+
+  if (truncated) {
     onWarning(
-      `profile image cleanup left ${paths.length} object(s) in ${bucket}: ${removed.error.message}`,
+      `profile image cleanup removed ${removed} object(s) from ${bucket} but the listing was ` +
+        `truncated at ${MAX_AVATAR_OBJECTS}; more objects may remain.`,
     );
   }
 }

@@ -57,6 +57,13 @@
       "when": 1789298400000,
       "tag": "0007_notification_order",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789302000000,
+      "tag": "0008_avatar_segment_policies",
+      "breakpoints": true
     }
   ]
 }

@@ -103,6 +103,20 @@ describe('parseEnv', () => {
     );
   });
 
+  it('rejects a service-role key that is not a decodable JWT', () => {
+    // An opaque or publishable key cannot be shown to carry the service_role
+    // claim, so it fails closed rather than being trusted on shape alone.
+    expect(() =>
+      parseEnv(validEnv({ SUPABASE_SERVICE_ROLE_KEY: 'sb_publishable_not-a-jwt' })),
+    ).toThrow(/not a decodable JWT/);
+  });
+
+  it('rejects a JWT whose payload has no role claim', () => {
+    expect(() =>
+      parseEnv(validEnv({ SUPABASE_SERVICE_ROLE_KEY: fakeJwt({ sub: 'someone' }) })),
+    ).toThrow(/service_role token/);
+  });
+
   it('rejects a protocol fee that differs from the on-chain fee', () => {
     expect(() => parseEnv(validEnv({ PROTOCOL_FEE_BPS: '100' }))).toThrow(/must be 50/);
   });
