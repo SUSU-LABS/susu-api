@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Networks } from '@stellar/stellar-sdk';
 import { resolveSslPolicy } from '../db/ssl';
 
 /**
@@ -115,6 +116,20 @@ function assertSecurityInvariants(env: Env): void {
     throw new Error(
       'STELLAR_NETWORK is mainnet but ALLOW_MAINNET is not "true". ' +
         'Mainnet is out of scope until the Mainnet readiness gate is passed with explicit approval.',
+    );
+  }
+
+  const expectedPassphrase =
+    env.STELLAR_NETWORK === 'mainnet'
+      ? Networks.PUBLIC
+      : env.STELLAR_NETWORK === 'testnet'
+        ? Networks.TESTNET
+        : Networks.STANDALONE;
+
+  if (env.STELLAR_NETWORK_PASSPHRASE !== expectedPassphrase) {
+    throw new Error(
+      `STELLAR_NETWORK_PASSPHRASE "${env.STELLAR_NETWORK_PASSPHRASE}" does not match STELLAR_NETWORK "${env.STELLAR_NETWORK}". ` +
+        `Expected "${expectedPassphrase}".`,
     );
   }
 
