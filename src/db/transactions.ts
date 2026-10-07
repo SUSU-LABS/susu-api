@@ -29,6 +29,20 @@ import type * as schema from './schema';
 const TX_HASH_PATTERN = /^[0-9a-fA-F]{64}$/;
 
 /**
+ * The most decoded events one receipt may carry.
+ *
+ * A transaction can legitimately emit many events, but the receipt endpoint
+ * answers with the whole array in a single JSON body, so an unbounded query
+ * turns a chatty (or adversarial, in an allowed invocation) contract into an
+ * arbitrarily large response. The cap is enforced in the SQL itself (`LIMIT`),
+ * not in JavaScript, so the database never materialises rows the response would
+ * discard. One hundred is far above what a legitimate Susu transaction emits —
+ * a contribution is followed by its fee — while keeping the worst-case body
+ * small and predictable.
+ */
+export const MAX_RECEIPT_EVENTS = 100;
+
+/**
  * Whether a string could be a transaction hash.
  *
  * Uppercase is accepted because the hash is normalised before it is used, not
@@ -61,7 +75,11 @@ export type TransactionReceipt = {
   /** The ledger the transaction was included in. */
   readonly ledger: number;
   readonly txIndex: number;
-  /** In the order the contract emitted them. */
+  /**
+   * In the order the contract emitted them. Capped at `MAX_RECEIPT_EVENTS`:
+   * the response never carries more, however many events the transaction
+   * emitted.
+   */
   readonly events: readonly TransactionEvent[];
 };
 
@@ -132,6 +150,7 @@ export function createTransactionReadModel(
           from public.decoded_events
           where tx_hash = ${txHash}
           order by event_index
+          limit ${MAX_RECEIPT_EVENTS}
         `,
       )) as readonly EventRow[];
 
