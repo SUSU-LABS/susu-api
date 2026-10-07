@@ -42,6 +42,15 @@ export function buildLoggerOptions(nodeEnv: string): FastifyServerOptions['logge
       paths: [...REDACT_PATHS],
       censor: '[redacted]',
     },
-    ...(isProduction ? {} : { transport: undefined }),
+    ...(isProduction
+      ? {}
+      : {
+          transport: {
+            target: 'pino-pretty',
+            options: {
+              colorize: true,
+            },
+          },
+        }),
   };
 }
