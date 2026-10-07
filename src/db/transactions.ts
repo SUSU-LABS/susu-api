@@ -45,6 +45,18 @@ export function normaliseTransactionHash(value: string): string {
   return value.toLowerCase();
 }
 
+/**
+ * The most events a receipt will ever return.
+ *
+ * A transaction's events decide the response size, and a contract (or an
+ * adversarial one in an allowed invocation) can emit many. The route must not
+ * let one transaction turn into an arbitrarily large body, so the query is
+ * bounded and the receipt says when it was cut. The cap is generous: a real
+ * Susu receipt is a handful of events, and a caller seeing `truncated: true`
+ * knows the response is partial rather than complete.
+ */
+export const MAX_RECEIPT_EVENTS = 100;
+
 export type TransactionEvent = {
   readonly eventIdentity: string;
   /** The decoded event name, e.g. `contribution`. */
@@ -63,6 +75,11 @@ export type TransactionReceipt = {
   readonly txIndex: number;
   /** In the order the contract emitted them. */
   readonly events: readonly TransactionEvent[];
+  /**
+   * True when the transaction emitted more events than `MAX_RECEIPT_EVENTS`,
+   * so `events` is a bounded prefix rather than the whole receipt.
+   */
+  readonly truncated: boolean;
 };
 
 export type TransactionReadModel = {
@@ -93,7 +110,11 @@ type EventRow = {
  * position within it. Asserting that they agree rather than taking the first
  * would be more code for a case the primary key already prevents.
  */
-function toReceipt(txHash: string, rows: readonly EventRow[]): TransactionReceipt | undefined {
+function toReceipt(
+  txHash: string,
+  rows: readonly EventRow[],
+  truncated: boolean,
+): TransactionReceipt | undefined {
   const first = rows[0];
   if (first === undefined) return undefined;
 
@@ -110,6 +131,7 @@ function toReceipt(txHash: string, rows: readonly EventRow[]): TransactionReceip
       eventIndex: assertCount(row.event_index, 'decoded_events.event_index'),
       payload: row.payload,
     })),
+    truncated,
   };
 }
 
@@ -118,6 +140,8 @@ export function createTransactionReadModel(
 ): TransactionReadModel {
   return {
     async getReceipt(txHash) {
+      // One row past the cap is fetched so truncation is detected rather than
+      // silently assumed; the extra row is never returned.
       const rows = (await queryRows(
         db,
         sql`
@@ -132,11 +156,14 @@ export function createTransactionReadModel(
           from public.decoded_events
           where tx_hash = ${txHash}
           order by event_index
+          limit ${MAX_RECEIPT_EVENTS + 1}
         `,
       )) as readonly EventRow[];
 
-      const receipt = toReceipt(txHash, rows);
-      return receipt;
+      if (rows.length === 0) return undefined;
+
+      const truncated = rows.length > MAX_RECEIPT_EVENTS;
+      return toReceipt(txHash, rows.slice(0, MAX_RECEIPT_EVENTS), truncated);
     },
   };
 }
