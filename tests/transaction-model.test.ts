@@ -5,6 +5,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import {
   createTransactionReadModel,
   isTransactionHash,
+  MAX_RECEIPT_EVENTS,
   normaliseTransactionHash,
 } from '../src/db/transactions';
 import type * as schema from '../src/db/schema';
@@ -80,7 +81,22 @@ describe('getReceipt', () => {
     // The order is what makes a receipt readable and stable; without it a
     // two-event transaction could be reported fee-first.
     expect(query.sql).toContain('order by event_index');
-    expect(query.params).toEqual([TX_HASH]);
+    expect(query.params).toEqual([TX_HASH, MAX_RECEIPT_EVENTS]);
+  });
+
+  it('caps the events returned at MAX_RECEIPT_EVENTS, in the database', async () => {
+    const { db, execute } = stubDb([]);
+
+    await createTransactionReadModel(db).getReceipt(TX_HASH);
+
+    // The bound lives in the SQL, not in JavaScript: the database must never
+    // materialise the rows the response would discard. A transaction that
+    // emits more events than the cap — or an adversarial contract in an allowed
+    // invocation — still produces a bounded body.
+    const query = rendered(execute.mock.calls[0]?.[0]);
+    expect(query.sql).toContain('limit');
+    expect(query.params).toContain(MAX_RECEIPT_EVENTS);
+    expect(MAX_RECEIPT_EVENTS).toBeGreaterThan(0);
   });
 
   it('returns undefined when the index has no events for the transaction', async () => {
