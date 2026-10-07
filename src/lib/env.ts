@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Networks } from '@stellar/stellar-sdk';
 import { resolveSslPolicy } from '../db/ssl';
 
 /**
@@ -11,6 +12,22 @@ import { resolveSslPolicy } from '../db/ssl';
 
 /** The MVP protocol fee. Changing this is a financial-invariant change. */
 export const PROTOCOL_FEE_BPS_MVP = 50;
+
+/**
+ * The network each well-known Stellar passphrase identifies. A passphrase is a
+ * network's identity on the wire: signing or verifying against the wrong one
+ * silently addresses the wrong ledger, so a known passphrase that does not
+ * match the configured network is a startup error, not a warning.
+ *
+ * Passphrases outside this map (custom standalone networks) are accepted as-is:
+ * only a positive identification of the *wrong* network is rejected.
+ */
+const KNOWN_PASSPHRASE_NETWORKS: ReadonlyMap<string, 'local' | 'testnet' | 'mainnet'> = new Map([
+  [Networks.TESTNET, 'testnet'],
+  [Networks.PUBLIC, 'mainnet'],
+  [Networks.STANDALONE, 'local'],
+  [Networks.SANDBOX, 'local'],
+]);
 
 const contractIdSchema = z.union([z.string().regex(/^C[A-Z2-7]{55}$/), z.literal('')]);
 const accountIdSchema = z.union([z.string().regex(/^G[A-Z2-7]{55}$/), z.literal('')]);
@@ -115,6 +132,20 @@ function assertSecurityInvariants(env: Env): void {
     throw new Error(
       'STELLAR_NETWORK is mainnet but ALLOW_MAINNET is not "true". ' +
         'Mainnet is out of scope until the Mainnet readiness gate is passed with explicit approval.',
+    );
+  }
+
+  // A passphrase names the network. Accepting `testnet` with the Mainnet
+  // passphrase (or vice versa) starts cleanly and then signs, verifies, and
+  // labels wallet-link messages against the wrong ledger — the nonce message
+  // at `src/lib/nonce.ts` would name a network the deployment is not on.
+  // Refuse it here, at startup, rather than after the first confusing failure.
+  const passphraseNetwork = KNOWN_PASSPHRASE_NETWORKS.get(env.STELLAR_NETWORK_PASSPHRASE);
+  if (passphraseNetwork !== undefined && passphraseNetwork !== env.STELLAR_NETWORK) {
+    throw new Error(
+      `STELLAR_NETWORK is "${env.STELLAR_NETWORK}" but STELLAR_NETWORK_PASSPHRASE is the ` +
+        `"${passphraseNetwork}" network passphrase. A mismatched passphrase silently addresses ` +
+        'the wrong ledger; refusing to start.',
     );
   }
 
