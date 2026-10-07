@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Networks } from '@stellar/stellar-sdk';
 import { parseEnv, PROTOCOL_FEE_BPS_MVP } from './env';
 
 function encodeSegment(value: unknown): string {
@@ -117,8 +118,85 @@ describe('parseEnv', () => {
   });
 
   it('allows mainnet only with explicit opt-in', () => {
-    const env = parseEnv(validEnv({ STELLAR_NETWORK: 'mainnet', ALLOW_MAINNET: 'true' }));
+    // The fixture's default passphrase is testnet's; a mainnet deployment
+    // must name the mainnet passphrase to match.
+    const env = parseEnv(
+      validEnv({
+        STELLAR_NETWORK: 'mainnet',
+        ALLOW_MAINNET: 'true',
+        STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+      }),
+    );
     expect(env.STELLAR_NETWORK).toBe('mainnet');
+  });
+
+  it('rejects testnet with the mainnet passphrase', () => {
+    // The misconfiguration the nonce message would otherwise paper over: the
+    // deployment says testnet while every signature names Mainnet.
+    expect(() =>
+      parseEnv(
+        validEnv({
+          STELLAR_NETWORK: 'testnet',
+          STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+        }),
+      ),
+    ).toThrow(/STELLAR_NETWORK_PASSPHRASE.*mainnet/);
+  });
+
+  it('rejects mainnet with the testnet passphrase', () => {
+    expect(() =>
+      parseEnv(
+        validEnv({
+          STELLAR_NETWORK: 'mainnet',
+          ALLOW_MAINNET: 'true',
+          STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET,
+        }),
+      ),
+    ).toThrow(/STELLAR_NETWORK_PASSPHRASE.*testnet/);
+  });
+
+  it('rejects local with a known passphrase from another network', () => {
+    expect(() =>
+      parseEnv(
+        validEnv({
+          STELLAR_NETWORK: 'local',
+          STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET,
+        }),
+      ),
+    ).toThrow(/STELLAR_NETWORK_PASSPHRASE/);
+  });
+
+  it('accepts mainnet with the mainnet passphrase', () => {
+    const env = parseEnv(
+      validEnv({
+        STELLAR_NETWORK: 'mainnet',
+        ALLOW_MAINNET: 'true',
+        STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+      }),
+    );
+    expect(env.STELLAR_NETWORK).toBe('mainnet');
+  });
+
+  it('accepts local with the standalone passphrase', () => {
+    const env = parseEnv(
+      validEnv({
+        STELLAR_NETWORK: 'local',
+        STELLAR_NETWORK_PASSPHRASE: Networks.STANDALONE,
+      }),
+    );
+    expect(env.STELLAR_NETWORK).toBe('local');
+  });
+
+  it('accepts local with a custom passphrase it does not recognise', () => {
+    // Only a positive identification of the wrong network is rejected; a
+    // private standalone network keeps its own passphrase.
+    const env = parseEnv(
+      validEnv({
+        STELLAR_NETWORK: 'local',
+        STELLAR_NETWORK_PASSPHRASE: 'My Private Network ; 2026',
+      }),
+    );
+    expect(env.STELLAR_NETWORK).toBe('local');
   });
 
   it('accepts a well-formed treasury account address', () => {
