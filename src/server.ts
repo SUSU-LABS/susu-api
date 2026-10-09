@@ -209,12 +209,13 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     readModel: options.transactionReadModel ?? createTransactionReadModel(getDb()),
     simulate: options.sorobanSimulator ?? createSorobanSimulator(env.STELLAR_RPC_URL),
     networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
-    // The Factory, or a group the index knows or that was registered after its
-    // creation confirmed. Without this, prepare would be an open simulation proxy
-    // for anyone with a session.
+    // The Factory, or a group the index has actually seen. Registrations are
+    // deliberately not honoured here: they are unverified claims, and letting
+    // them through would turn prepare into an open simulation proxy for anyone
+    // with a session. They stay scoped to invite creation only.
     isAllowedContract: async (contractId) =>
       (env.FACTORY_CONTRACT_ID !== '' && contractId === env.FACTORY_CONTRACT_ID) ||
-      (await isKnownGroup(contractId)),
+      (await groupReadModel.groupExists(contractId)),
   });
 
   app.setNotFoundHandler(async (_request, reply) => {

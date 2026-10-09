@@ -220,11 +220,13 @@ describe('POST /api/v1/transactions/prepare', () => {
     expect(response.headers['cache-control']).toBe('no-store');
   });
 
-  it('accepts a group that was registered before the index caught up', async () => {
-    // The creator's first act after the chain confirms is to invite people, which
-    // is exactly when the index has not seen the group yet. Refusing here would
-    // break the only flow that needs preparation most.
-    const { app, groupExists, isRegistered } = await harness({ registered: true });
+  it('refuses a registration-only address: unverified claims cannot simulate', async () => {
+    // Registrations are unverified claims — anyone can register any shape-valid
+    // address. Letting them through the prepare allowlist would turn the
+    // endpoint into an open simulation proxy paid for by this service, so the
+    // allowlist consults the index only. Registrations stay scoped to invite
+    // creation.
+    const { app, simulate, groupExists, isRegistered } = await harness({ registered: true });
 
     const response = await app.inject({
       method: 'POST',
@@ -233,10 +235,13 @@ describe('POST /api/v1/transactions/prepare', () => {
       payload: { transactionXdr: envelopeXdr(OTHER, 'contribute') },
     });
 
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'contract_not_allowed' });
     expect(groupExists).toHaveBeenCalledWith(OTHER);
-    expect(isRegistered).toHaveBeenCalledWith(OTHER);
-    expect(response.json().data.status).toBe('prepared');
+    // The registration store is never consulted for the prepare allowlist, and
+    // the simulator is never reached.
+    expect(isRegistered).not.toHaveBeenCalled();
+    expect(simulate).not.toHaveBeenCalled();
   });
 
   it('refuses to simulate a contract that is not one of ours', async () => {
