@@ -18,9 +18,14 @@ configureTestEnv();
 
 const USER_ID = '11111111-1111-1111-1111-111111111111';
 const PREFIX = `users/${USER_ID}/avatar`;
+const LIST_LIMIT = 100;
+
+type ListResult = { data: { name: string }[] | null; error: { message: string } | null };
 
 type FakeOptions = {
-  list?: { data: { name: string }[] | null; error: { message: string } | null };
+  list?: ListResult;
+  /** Overrides `list`, called per request so pages can be scripted. */
+  listImpl?: (options: { limit?: number; offset?: number } | undefined) => ListResult;
   remove?: { data: { name: string }[] | null; error: { message: string } | null };
   deleteUser?: { error: { message: string } | null };
 };
@@ -39,8 +44,9 @@ function fakeClient(options: FakeOptions = {}): Fake {
   const calls: string[] = [];
   const buckets: string[] = [];
 
-  const list = vi.fn(async (path: string) => {
+  const list = vi.fn(async (path: string, listOptions?: { limit?: number; offset?: number }) => {
     calls.push(`list:${path}`);
+    if (options.listImpl !== undefined) return options.listImpl(listOptions);
     return options.list ?? { data: [{ name: 'a'.repeat(32) + '.png' }], error: null };
   });
   const remove = vi.fn(async (paths: readonly string[]) => {
@@ -159,6 +165,55 @@ describe('createAccountDeleter', () => {
     const options = fake.list.mock.calls[0]?.[1] as { limit?: number } | undefined;
     expect(options?.limit).toBeGreaterThan(0);
     expect(options?.limit).toBeLessThanOrEqual(100);
+  });
+
+  it('pages through every avatar object rather than just the first page', async () => {
+    const firstPage = Array.from({ length: LIST_LIMIT }, (_unused, index) => ({
+      name: `${index.toString(16).padStart(32, '0')}.png`,
+    }));
+    const fake = fakeClient({
+      listImpl: (options) =>
+        options?.offset === 0
+          ? { data: firstPage, error: null }
+          : options?.offset === LIST_LIMIT
+            ? { data: [{ name: `${'f'.repeat(32)}.png` }], error: null }
+            : { data: [], error: null },
+    });
+    const deleteAccount = createAccountDeleter(fake.client);
+
+    await deleteAccount(USER_ID);
+
+    // The second page is reached only because the first was full.
+    expect(fake.list.mock.calls.map((call) => (call[1] as { offset: number }).offset)).toEqual([
+      0,
+      LIST_LIMIT,
+    ]);
+    // Both pages are removed: the full one and the short one that ended it.
+    expect(fake.remove).toHaveBeenCalledTimes(2);
+    expect((fake.remove.mock.calls[0]?.[0] as string[]).length).toBe(LIST_LIMIT);
+    expect((fake.remove.mock.calls[1]?.[0] as string[]).length).toBe(1);
+  });
+
+  it('warns when the listing hits its ceiling and may leave objects behind', async () => {
+    const page = (offset: number) =>
+      Array.from({ length: LIST_LIMIT }, (_unused, index) => ({
+        name: `${(offset + index).toString(16).padStart(32, '0')}.png`,
+      }));
+    const fake = fakeClient({
+      listImpl: (options) => ({ data: page(options?.offset ?? 0), error: null }),
+    });
+    const warnings: string[] = [];
+    const deleteAccount = createAccountDeleter(fake.client, {
+      onWarning: (message) => warnings.push(message),
+    });
+
+    await deleteAccount(USER_ID);
+
+    // Every page is full forever, so the run ends on the ceiling rather than a
+    // short page — and that truncation is reported, not silent.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/truncated/);
+    expect(fake.deleteUser).toHaveBeenCalledWith(USER_ID);
   });
 
   it('takes the bucket as configuration rather than assuming it', async () => {

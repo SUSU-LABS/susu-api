@@ -95,6 +95,130 @@ describe('response headers', () => {
   });
 });
 
+describe('trustProxy and rate limit protection', () => {
+  it('shares one limiter bucket when X-Forwarded-For is forged from an untrusted peer', async () => {
+    const { buildServer } = await import('../src/server');
+    const server = await buildServer({
+      probeDatabase: async () => {},
+      trustProxy: ['10.0.0.0/8'],
+      rateLimitMax: 2,
+    });
+
+    try {
+      const res1 = await server.inject({
+        method: 'GET',
+        url: '/health',
+        remoteAddress: '198.51.100.1',
+        headers: { 'x-forwarded-for': '1.1.1.1' },
+      });
+      expect(res1.statusCode).toBe(200);
+
+      const res2 = await server.inject({
+        method: 'GET',
+        url: '/health',
+        remoteAddress: '198.51.100.1',
+        headers: { 'x-forwarded-for': '2.2.2.2' },
+      });
+      expect(res2.statusCode).toBe(200);
+
+      const res3 = await server.inject({
+        method: 'GET',
+        url: '/health',
+        remoteAddress: '198.51.100.1',
+        headers: { 'x-forwarded-for': '3.3.3.3' },
+      });
+      expect(res3.statusCode).toBe(429);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('respects X-Forwarded-For when request arrives from a trusted proxy CIDR', async () => {
+    const { buildServer } = await import('../src/server');
+    const server = await buildServer({
+      probeDatabase: async () => {},
+      trustProxy: ['10.0.0.0/8'],
+      rateLimitMax: 2,
+    });
+
+    try {
+      const res1 = await server.inject({
+        method: 'GET',
+        url: '/health',
+        remoteAddress: '10.0.0.1',
+        headers: { 'x-forwarded-for': '1.1.1.1' },
+      });
+      expect(res1.statusCode).toBe(200);
+
+      const res2 = await server.inject({
+        method: 'GET',
+        url: '/health',
+        remoteAddress: '10.0.0.1',
+        headers: { 'x-forwarded-for': '2.2.2.2' },
+      });
+      expect(res2.statusCode).toBe(200);
+
+      const res3 = await server.inject({
+        method: 'GET',
+        url: '/health',
+        remoteAddress: '10.0.0.1',
+        headers: { 'x-forwarded-for': '3.3.3.3' },
+      });
+      expect(res3.statusCode).toBe(200);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('reads trusted CIDRs from TRUSTED_PROXY_CIDRS environment variable', async () => {
+    const original = process.env['TRUSTED_PROXY_CIDRS'];
+    process.env['TRUSTED_PROXY_CIDRS'] = '10.0.0.0/8';
+    try {
+      const { buildServer } = await import('../src/server');
+      const server = await buildServer({
+        probeDatabase: async () => {},
+        rateLimitMax: 1,
+      });
+
+      try {
+        const res1 = await server.inject({
+          method: 'GET',
+          url: '/health',
+          remoteAddress: '198.51.100.1',
+          headers: { 'x-forwarded-for': '1.1.1.1' },
+        });
+        expect(res1.statusCode).toBe(200);
+
+        const res2 = await server.inject({
+          method: 'GET',
+          url: '/health',
+          remoteAddress: '198.51.100.1',
+          headers: { 'x-forwarded-for': '2.2.2.2' },
+        });
+        expect(res2.statusCode).toBe(429);
+      } finally {
+        await server.close();
+      }
+    } finally {
+      if (original === undefined) delete process.env['TRUSTED_PROXY_CIDRS'];
+      else process.env['TRUSTED_PROXY_CIDRS'] = original;
+    }
+  });
+
+  it('resolves trustProxy properly based on inputs', async () => {
+    const { resolveTrustProxy } = await import('../src/server');
+    expect(resolveTrustProxy(undefined, undefined)).toBe(false);
+    expect(resolveTrustProxy('', undefined)).toBe(false);
+    expect(resolveTrustProxy('   ', undefined)).toBe(false);
+    expect(resolveTrustProxy('10.0.0.0/8, 172.16.0.0/12', undefined)).toEqual([
+      '10.0.0.0/8',
+      '172.16.0.0/12',
+    ]);
+    expect(resolveTrustProxy('10.0.0.0/8', false)).toBe(false);
+    expect(resolveTrustProxy(undefined, true)).toBe(true);
+  });
+});
+
 describe('expired wallet-link nonces', () => {
   /**
    * A nonce row is kept past its expiry on purpose, so a replay is refused as a

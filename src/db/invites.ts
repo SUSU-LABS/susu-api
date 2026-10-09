@@ -139,6 +139,49 @@ export function createInviteStore(db: Database): InviteStore {
     },
 
     async redeem({ code, userId, shouldClaim }) {
+      // The claim decision needs I/O (a group-status read on the shared pool),
+      // so it is resolved here, before the transaction opens. Awaiting it while
+      // holding the invite row lock would hold the lock across a network round
+      // trip, serializing every concurrent redemption behind a slow status read
+      // and risking pool exhaustion. `groupContractId` is immutable after
+      // creation, so this preview cannot disagree with the locked row below.
+      //
+      // The lookups below are courtesy only: the transaction re-checks
+      // everything under the lock and stays the authority. They exist so
+      // `shouldClaim` is not asked when the answer is already known — no such
+      // code, or a redemption this user already made.
+      const [preview] = await db
+        .select()
+        .from(inviteLinks)
+        .where(eq(inviteLinks.code, code))
+        .limit(1);
+
+      if (preview === undefined) return { outcome: 'not_found' } as const;
+      if (preview.revokedAt !== null) return { outcome: 'revoked' } as const;
+      if (preview.expiresAt !== null && preview.expiresAt.getTime() <= Date.now()) {
+        return { outcome: 'expired' } as const;
+      }
+
+      const [already] = await db
+        .select({ id: inviteRedemptions.id })
+        .from(inviteRedemptions)
+        .where(
+          and(eq(inviteRedemptions.inviteId, preview.id), eq(inviteRedemptions.userId, userId)),
+        )
+        .limit(1);
+
+      if (already !== undefined) {
+        return {
+          outcome: 'redeemed',
+          inviteId: preview.id,
+          groupContractId: preview.groupContractId,
+          claimed: true,
+        } as const;
+      }
+
+      const claim =
+        shouldClaim === undefined ? undefined : await shouldClaim(preview.groupContractId);
+
       return db.transaction(async (tx) => {
         // `for update` is the whole reason this is a transaction. Without it the
         // capacity check below is advisory: two concurrent joins would both read
@@ -183,12 +226,11 @@ export function createInviteStore(db: Database): InviteStore {
           } as const;
         }
 
-        // Asked before capacity and before anything is written, so a group that
-        // cannot be joined leaves the invite exactly as it was. Awaited inside the
-        // transaction because the answer is only needed here; it reads the read
-        // model rather than this transaction's tables, so it neither depends on
-        // nor extends the lock.
-        if (shouldClaim !== undefined && !(await shouldClaim(groupContractId))) {
+        // `claim` was resolved before the transaction opened, so the row lock is
+        // never held across the status read's I/O. Asked before capacity and
+        // before anything is written, so a group that cannot be joined leaves
+        // the invite exactly as it was.
+        if (claim === false) {
           return {
             outcome: 'redeemed',
             inviteId: invite.id,

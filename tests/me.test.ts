@@ -333,18 +333,55 @@ describe('PATCH /api/v1/me', () => {
     expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, { displayName: null });
   });
 
-  it('does not write a field the caller did not mention', async () => {
+  it('writes an avatar path owned by the authenticated user', async () => {
     const { app, readModel } = await harness();
+    const avatarPath = `users/${USER_ID}/avatar/${'a'.repeat(32)}.webp`;
     await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath },
+    });
+
+    expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, {
+      avatarPath,
+    });
+  });
+
+  it('rejects an avatar path that the database constraint would refuse', async () => {
+    const { app, readModel } = await harness();
+    const response = await app.inject({
       method: 'PATCH',
       url: '/api/v1/me',
       headers: AUTH,
       payload: { avatarPath: 'users/abc/avatar/x.webp' },
     });
 
-    expect(readModel.updateProfile).toHaveBeenCalledWith(USER_ID, {
-      avatarPath: 'users/abc/avatar/x.webp',
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: 'invalid_request',
+      details: [
+        {
+          path: 'avatarPath',
+          message: 'must be an avatar object key owned by the authenticated user',
+        },
+      ],
     });
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('rejects a well-shaped avatar path owned by another user', async () => {
+    const { app, readModel } = await harness();
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/me',
+      headers: AUTH,
+      payload: { avatarPath: `users/${OTHER_ID}/avatar/${'b'.repeat(32)}.png` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().details[0].path).toBe('avatarPath');
+    expect(readModel.updateProfile).not.toHaveBeenCalled();
   });
 
   it('rejects an empty body', async () => {

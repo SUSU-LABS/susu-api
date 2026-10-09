@@ -1,4 +1,9 @@
-import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyBaseLogger,
+  type FastifyError,
+  type FastifyInstance,
+  type FastifyServerOptions,
+} from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
@@ -49,7 +54,33 @@ export type BuildServerOptions = {
   notificationReadModel?: NotificationReadModel;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
+  trustProxy?: FastifyServerOptions['trustProxy'];
+  rateLimitMax?: number;
 };
+
+/**
+ * Resolves trustProxy setting from environment CIDRs or explicit option override.
+ *
+ * Trusting all proxies (`true`) allows any client to spoof `X-Forwarded-*` headers,
+ * bypassing IP-keyed rate limits and audit logs. By default, proxies are untrusted
+ * (`false`) unless specific trusted CIDRs or options are configured.
+ */
+export function resolveTrustProxy(
+  configuredCidrs?: string,
+  optionOverride?: FastifyServerOptions['trustProxy'],
+): FastifyServerOptions['trustProxy'] {
+  if (optionOverride !== undefined) {
+    return optionOverride;
+  }
+  if (!configuredCidrs) {
+    return false;
+  }
+  const cidrs = configuredCidrs
+    .split(',')
+    .map((cidr) => cidr.trim())
+    .filter((cidr) => cidr.length > 0);
+  return cidrs.length > 0 ? cidrs : false;
+}
 
 /**
  * Builds the API server.
@@ -66,11 +97,12 @@ export type BuildServerOptions = {
  */
 export async function buildServer(options: BuildServerOptions = {}): Promise<FastifyInstance> {
   const env = getEnv();
+  const trustProxy = resolveTrustProxy(env.TRUSTED_PROXY_CIDRS, options.trustProxy);
 
   const app = Fastify({
     logger: buildLoggerOptions(env.NODE_ENV),
     bodyLimit: 64 * 1024,
-    trustProxy: true,
+    trustProxy,
   });
 
   await app.register(helmet, {
@@ -89,7 +121,7 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   });
 
   await app.register(rateLimit, {
-    max: 100,
+    max: options.rateLimitMax ?? 100,
     timeWindow: '1 minute',
   });
 
@@ -209,12 +241,13 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     readModel: options.transactionReadModel ?? createTransactionReadModel(getDb()),
     simulate: options.sorobanSimulator ?? createSorobanSimulator(env.STELLAR_RPC_URL),
     networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
-    // The Factory, or a group the index knows or that was registered after its
-    // creation confirmed. Without this, prepare would be an open simulation proxy
-    // for anyone with a session.
+    // The Factory, or a group the index has actually seen. Registrations are
+    // deliberately not honoured here: they are unverified claims, and letting
+    // them through would turn prepare into an open simulation proxy for anyone
+    // with a session. They stay scoped to invite creation only.
     isAllowedContract: async (contractId) =>
       (env.FACTORY_CONTRACT_ID !== '' && contractId === env.FACTORY_CONTRACT_ID) ||
-      (await isKnownGroup(contractId)),
+      (await groupReadModel.groupExists(contractId)),
   });
 
   app.setNotFoundHandler(async (_request, reply) => {

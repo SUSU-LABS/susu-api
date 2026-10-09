@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Networks } from '@stellar/stellar-sdk';
 import { parseEnv, PROTOCOL_FEE_BPS_MVP } from './env';
 
 function encodeSegment(value: unknown): string {
@@ -102,6 +103,20 @@ describe('parseEnv', () => {
     );
   });
 
+  it('rejects a service-role key that is not a decodable JWT', () => {
+    // An opaque or publishable key cannot be shown to carry the service_role
+    // claim, so it fails closed rather than being trusted on shape alone.
+    expect(() =>
+      parseEnv(validEnv({ SUPABASE_SERVICE_ROLE_KEY: 'sb_publishable_not-a-jwt' })),
+    ).toThrow(/not a decodable JWT/);
+  });
+
+  it('rejects a JWT whose payload has no role claim', () => {
+    expect(() =>
+      parseEnv(validEnv({ SUPABASE_SERVICE_ROLE_KEY: fakeJwt({ sub: 'someone' }) })),
+    ).toThrow(/service_role token/);
+  });
+
   it('rejects a protocol fee that differs from the on-chain fee', () => {
     expect(() => parseEnv(validEnv({ PROTOCOL_FEE_BPS: '100' }))).toThrow(/must be 50/);
   });
@@ -116,9 +131,55 @@ describe('parseEnv', () => {
     expect(() => parseEnv(validEnv({ STELLAR_NETWORK: 'mainnet' }))).toThrow(/ALLOW_MAINNET/);
   });
 
-  it('allows mainnet only with explicit opt-in', () => {
-    const env = parseEnv(validEnv({ STELLAR_NETWORK: 'mainnet', ALLOW_MAINNET: 'true' }));
+  it('allows mainnet only with explicit opt-in and public network passphrase', () => {
+    const env = parseEnv(
+      validEnv({
+        STELLAR_NETWORK: 'mainnet',
+        STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+        ALLOW_MAINNET: 'true',
+      }),
+    );
     expect(env.STELLAR_NETWORK).toBe('mainnet');
+  });
+
+  it('rejects STELLAR_NETWORK / STELLAR_NETWORK_PASSPHRASE mismatches', () => {
+    expect(() =>
+      parseEnv(
+        validEnv({
+          STELLAR_NETWORK: 'testnet',
+          STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+        }),
+      ),
+    ).toThrow(/does not match STELLAR_NETWORK/);
+
+    expect(() =>
+      parseEnv(
+        validEnv({
+          STELLAR_NETWORK: 'mainnet',
+          STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET,
+          ALLOW_MAINNET: 'true',
+        }),
+      ),
+    ).toThrow(/does not match STELLAR_NETWORK/);
+
+    expect(() =>
+      parseEnv(
+        validEnv({
+          STELLAR_NETWORK: 'local',
+          STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET,
+        }),
+      ),
+    ).toThrow(/does not match STELLAR_NETWORK/);
+  });
+
+  it('accepts valid local network passphrase', () => {
+    const env = parseEnv(
+      validEnv({
+        STELLAR_NETWORK: 'local',
+        STELLAR_NETWORK_PASSPHRASE: Networks.STANDALONE,
+      }),
+    );
+    expect(env.STELLAR_NETWORK).toBe('local');
   });
 
   it('accepts a well-formed treasury account address', () => {
@@ -140,5 +201,15 @@ describe('parseEnv', () => {
     } catch (error) {
       expect(String(error)).not.toContain('super-secret-xyz');
     }
+  });
+
+  it('accepts and defaults TRUSTED_PROXY_CIDRS', () => {
+    const envDefault = parseEnv(validEnv());
+    expect(envDefault.TRUSTED_PROXY_CIDRS).toBe('');
+
+    const envConfigured = parseEnv(
+      validEnv({ TRUSTED_PROXY_CIDRS: '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16' }),
+    );
+    expect(envConfigured.TRUSTED_PROXY_CIDRS).toBe('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16');
   });
 });

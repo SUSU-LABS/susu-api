@@ -91,6 +91,12 @@ services:
       - key: ALLOW_MAINNET
         value: 'false'
 
+      # Trusted proxy CIDRs for Render's reverse proxy network.
+      # Configures Fastify's trustProxy to only trust Render's internal proxy
+      # ranges rather than trusting all clients, preventing IP spoofing.
+      - key: TRUSTED_PROXY_CIDRS
+        value: '10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'
+
       # ---------------------------------------------------------------------
       # Secrets. Render prompts for each of these once, during creation.
       # ---------------------------------------------------------------------

@@ -36,6 +36,7 @@ function receipt(overrides: Partial<TransactionReceipt> = {}): TransactionReceip
         payload: { amount: '500000' },
       },
     ],
+    truncated: false,
     ...overrides,
   };
 }
@@ -94,6 +95,14 @@ describe('GET /api/v1/transactions/:txHash', () => {
       'contribution',
       'fee',
     ]);
+  });
+
+  it('passes through the truncation flag for a bounded receipt', async () => {
+    const { app } = await harness({ receipt: receipt({ truncated: true }) });
+
+    const response = await app.inject({ method: 'GET', url: `/api/v1/transactions/${TX_HASH}` });
+
+    expect(response.json().data.truncated).toBe(true);
   });
 
   it('names the contract that emitted each event', async () => {

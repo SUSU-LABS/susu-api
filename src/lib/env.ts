@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Networks } from '@stellar/stellar-sdk';
 import { resolveSslPolicy } from '../db/ssl';
 
 /**
@@ -68,6 +69,10 @@ export const envSchema = z.object({
   // Comma-separated allowlist. Empty means no cross-origin access.
   CORS_ALLOWED_ORIGINS: z.string().default(''),
 
+  // Comma-separated list of trusted proxy CIDRs (e.g. Render private ranges).
+  // Empty means no proxies are trusted (trustProxy: false), preventing header spoofing.
+  TRUSTED_PROXY_CIDRS: z.string().default(''),
+
   // Optional S3-compatible storage. Server-only credentials.
   S3_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().optional(),
@@ -93,7 +98,17 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | undef
 
 function assertSecurityInvariants(env: Env): void {
   const claims = decodeJwtPayload(env.SUPABASE_SERVICE_ROLE_KEY);
-  if (claims && claims['role'] !== 'service_role') {
+  // Fail closed on an opaque key. A key that is not a decodable JWT cannot be
+  // shown to carry the service_role claim, so the only safe reading is that it
+  // is not a service-role key — accepting it would let a publishable or scoped
+  // key power the server-only paths.
+  if (claims === undefined) {
+    throw new Error(
+      'SUPABASE_SERVICE_ROLE_KEY is not a decodable JWT, so it cannot be verified as a ' +
+        'service_role token. Refusing to start with an unverifiable key in a server-only variable.',
+    );
+  }
+  if (claims['role'] !== 'service_role') {
     throw new Error(
       'SUPABASE_SERVICE_ROLE_KEY does not contain a service_role token. ' +
         'Refusing to start with a non-elevated key in a server-only variable.',
@@ -111,6 +126,20 @@ function assertSecurityInvariants(env: Env): void {
     throw new Error(
       'STELLAR_NETWORK is mainnet but ALLOW_MAINNET is not "true". ' +
         'Mainnet is out of scope until the Mainnet readiness gate is passed with explicit approval.',
+    );
+  }
+
+  const expectedPassphrase =
+    env.STELLAR_NETWORK === 'mainnet'
+      ? Networks.PUBLIC
+      : env.STELLAR_NETWORK === 'testnet'
+        ? Networks.TESTNET
+        : Networks.STANDALONE;
+
+  if (env.STELLAR_NETWORK_PASSPHRASE !== expectedPassphrase) {
+    throw new Error(
+      `STELLAR_NETWORK_PASSPHRASE "${env.STELLAR_NETWORK_PASSPHRASE}" does not match STELLAR_NETWORK "${env.STELLAR_NETWORK}". ` +
+        `Expected "${expectedPassphrase}".`,
     );
   }
 

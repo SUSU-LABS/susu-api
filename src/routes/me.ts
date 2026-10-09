@@ -63,6 +63,29 @@ const avatarPathSchema = z
   .refine((value) => !value.includes('..'), 'must not contain ".."')
   .nullable();
 
+/** Escape an authenticated subject before embedding it in the path regex. */
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The database accepts only the storage key shape owned by this exact user.
+ * Keeping the same check at the route boundary turns a constraint failure into
+ * an actionable 400 response and avoids using the database as input validation.
+ */
+function avatarPathForUserSchema(userId: string) {
+  const ownedAvatarPath = new RegExp(
+    `^users/${escapeRegex(userId)}/avatar/[0-9a-f]{32}\\.(?:png|jpe?g|webp)$`,
+  );
+
+  return z.object({
+    avatarPath: z
+      .string()
+      .regex(ownedAvatarPath, 'must be an avatar object key owned by the authenticated user')
+      .nullable(),
+  });
+}
+
 const patchBody = z
   .object({
     displayName: displayNameSchema.optional(),
@@ -106,6 +129,14 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
     const parsed = patchBody.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, parsed.error);
 
+    const user = authenticatedUser(request);
+    if (parsed.data.avatarPath !== undefined) {
+      const avatarPath = avatarPathForUserSchema(user.id).safeParse({
+        avatarPath: parsed.data.avatarPath,
+      });
+      if (!avatarPath.success) return invalidRequest(reply, avatarPath.error);
+    }
+
     // Built explicitly rather than passed through, so an absent field stays
     // absent instead of being written as `undefined` and clearing a value the
     // caller never mentioned.
@@ -113,7 +144,6 @@ export async function meRoutes(app: FastifyInstance, options: MeRoutesOptions): 
     if (parsed.data.displayName !== undefined) changes.displayName = parsed.data.displayName;
     if (parsed.data.avatarPath !== undefined) changes.avatarPath = parsed.data.avatarPath;
 
-    const user = authenticatedUser(request);
     const account = await accountReadModel.updateProfile(user.id, changes);
 
     reply.header('cache-control', NO_STORE);

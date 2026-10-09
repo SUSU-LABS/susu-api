@@ -191,4 +191,29 @@ describe('createRegistrationStore.register', () => {
     const result = await store.register({ contractId, userId: USER_ONE });
     expect(result.outcome).toBe('registered');
   });
+
+  it('two parallel registrations at the cap yield exactly one success and one too_many', async () => {
+    for (let index = 0; index < MAX_LIVE_REGISTRATIONS - 1; index += 1) {
+      const filled = await store.register({
+        contractId: distinctContractId(index),
+        userId: USER_ONE,
+      });
+      expect(filled.outcome).toBe('registered');
+    }
+
+    // The race this guards: without serialization both calls observe the same
+    // live count (MAX - 1) and both insert, leaving MAX + 1 live claims.
+    const [first, second] = await Promise.all([
+      store.register({ contractId: distinctContractId(10), userId: USER_ONE }),
+      store.register({ contractId: distinctContractId(11), userId: USER_ONE }),
+    ]);
+
+    expect([first.outcome, second.outcome].sort()).toEqual(['registered', 'too_many']);
+
+    const rows = await testDb.query(
+      'select count(*)::int as live from public.group_registrations where registered_by = $1 and expires_at > now()',
+      [USER_ONE],
+    );
+    expect(rows.rows[0]?.['live']).toBe(MAX_LIVE_REGISTRATIONS);
+  });
 });
