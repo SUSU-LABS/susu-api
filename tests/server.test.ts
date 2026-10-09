@@ -344,3 +344,54 @@ describe('the database pool is closed with the server', () => {
     expect(closeDatabase).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('the nonce reaper belongs to the server', () => {
+  it('runs on the interval the caller asked for, and stops when the server closes', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: { reap } as never,
+        nonceReapIntervalMs: 1_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(reap).toHaveBeenCalledTimes(1);
+
+      await app.close();
+
+      // A closed server must not keep reaping. The interval used to be started
+      // with its handle discarded, so it outlived the app — and a tick after
+      // close could lazily create a real database pool and query through it.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(reap).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not started for a caller that did not ask for it', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: { reap } as never,
+      });
+
+      // Long past the production interval: if a reaper were running at all it
+      // would have fired by now.
+      await vi.advanceTimersByTimeAsync(16 * 60 * 1000);
+      expect(reap).not.toHaveBeenCalled();
+
+      await app.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

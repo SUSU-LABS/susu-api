@@ -1,4 +1,4 @@
-import { buildServer } from './server';
+import { buildServer, NONCE_REAP_INTERVAL_MS } from './server';
 import { getEnv } from './lib/env';
 
 /**
@@ -9,7 +9,10 @@ import { getEnv } from './lib/env';
  */
 async function main(): Promise<void> {
   const env = getEnv();
-  const app = await buildServer();
+  // The only caller that starts the spent-nonce reaper. Everything else — tests
+  // above all — builds a server with no background timers unless it asks, and
+  // the timer that is started here is cleared when the server closes.
+  const app = await buildServer({ nonceReapIntervalMs: NONCE_REAP_INTERVAL_MS });
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
