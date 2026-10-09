@@ -18,6 +18,11 @@ import { GROUP_CONTRACT_ID, OTHER_CONTRACT_ID } from './support/fixtures';
  * and only then let the client discover, from the chain, that joining was never
  * possible. The claim is now withheld, and "withheld" has to mean nothing was
  * written at all.
+ *
+ * The same rule covers a join that names the wrong group: the code resolves, but
+ * the group in the path is not the group the code admits to, so there is no join
+ * to spend a use on. That mismatch is decided before the write for the same
+ * reason a withheld claim is.
  */
 
 let testDb: TestDb;
@@ -153,6 +158,80 @@ describe('a claim that is withheld', () => {
     expect(claimed).toMatchObject({ outcome: 'redeemed', claimed: true });
     expect(await usesOf(invite.id)).toBe(1);
     expect(await redemptionCount(invite.id)).toBe(1);
+  });
+});
+
+describe('a claim made against a different group', () => {
+  it('reports no such code, and writes nothing', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroupContractId: OTHER_CONTRACT_ID,
+    });
+
+    // The join path named a group the code does not admit to. Answered as an
+    // absent code rather than as a mismatch, so it confirms nothing, and — the
+    // part this file exists for — refused before anything was written.
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+  });
+
+  it('leaves the use for the join that is actually for this group', async () => {
+    // A single-use invite makes the cost observable: if the wrong-group attempt
+    // had burned the only place, the right group's join would be refused.
+    const invite = await seedInvite(1);
+    const wrongGroup = nextUser();
+    const rightGroup = nextUser();
+    await testDb.createUser(wrongGroup);
+    await testDb.createUser(rightGroup);
+
+    await store.redeem({
+      code: invite.code,
+      userId: wrongGroup,
+      expectedGroupContractId: OTHER_CONTRACT_ID,
+    });
+
+    const joined = await store.redeem({
+      code: invite.code,
+      userId: rightGroup,
+      expectedGroupContractId: GROUP_CONTRACT_ID,
+    });
+
+    expect(joined).toEqual({
+      outcome: 'redeemed',
+      inviteId: invite.id,
+      groupContractId: GROUP_CONTRACT_ID,
+      claimed: true,
+    });
+    expect(await usesOf(invite.id)).toBe(1);
+    expect(await redemptionCount(invite.id)).toBe(1);
+  });
+
+  it('does not ask the claim check either', async () => {
+    // The status read is I/O the mismatched request has no business paying for,
+    // and asking it would report a group the caller never asked about.
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    let asked = false;
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroupContractId: OTHER_CONTRACT_ID,
+      shouldClaim: async () => {
+        asked = true;
+        return true;
+      },
+    });
+
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(asked).toBe(false);
   });
 });
 

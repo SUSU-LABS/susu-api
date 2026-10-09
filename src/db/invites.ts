@@ -99,10 +99,19 @@ export type InviteStore = {
    * It is deliberately a courtesy and not a control. The chain refuses the join
    * on its own, and this answer can be stale by one indexer run, so it may only
    * ever be used to decline to spend a use, never to grant a join.
+   *
+   * `expectedGroupContractId` is the group the caller believes the code admits
+   * to — the one in the path of `POST /groups/:contractId/join`. When it does not
+   * match the code's group the outcome is `not_found`, decided from the preview
+   * read and re-checked under the lock, in both cases before a single row is
+   * written. That ordering is the point: a client whose code and group came from
+   * different places used to burn one of the invite's limited uses on a join that
+   * never happened.
    */
   redeem(input: {
     code: string;
     userId: string;
+    expectedGroupContractId?: string;
     shouldClaim?: (groupContractId: string) => Promise<boolean>;
   }): Promise<RedeemOutcome>;
 };
@@ -138,7 +147,7 @@ export function createInviteStore(db: Database): InviteStore {
       return toRecord(row);
     },
 
-    async redeem({ code, userId, shouldClaim }) {
+    async redeem({ code, userId, expectedGroupContractId, shouldClaim }) {
       // The claim decision needs I/O (a group-status read on the shared pool),
       // so it is resolved here, before the transaction opens. Awaiting it while
       // holding the invite row lock would hold the lock across a network round
@@ -157,6 +166,17 @@ export function createInviteStore(db: Database): InviteStore {
         .limit(1);
 
       if (preview === undefined) return { outcome: 'not_found' } as const;
+      // The code is for another group. Answered as absent, before the redemption
+      // lookup and before the transaction, so a mismatched join cannot spend a
+      // use, cannot record a redemption, and cannot even open a lock. The caller
+      // asked about a group this code does not admit to, which is the same answer
+      // an unknown code gets.
+      if (
+        expectedGroupContractId !== undefined &&
+        preview.groupContractId !== expectedGroupContractId
+      ) {
+        return { outcome: 'not_found' } as const;
+      }
       if (preview.revokedAt !== null) return { outcome: 'revoked' } as const;
       if (preview.expiresAt !== null && preview.expiresAt.getTime() <= Date.now()) {
         return { outcome: 'expired' } as const;
@@ -204,6 +224,15 @@ export function createInviteStore(db: Database): InviteStore {
         // address as well could never be satisfied by the link. `code` is unique,
         // so this is a single row.
         const groupContractId = invite.groupContractId;
+
+        // Re-checked under the lock rather than trusted from the preview: this is
+        // the authority the rest of the transaction defers to, and it is the last
+        // point at which the decision can still leave the tables untouched.
+        // `groupContractId` is immutable, so this can only disagree with the
+        // preview if that stops being true.
+        if (expectedGroupContractId !== undefined && groupContractId !== expectedGroupContractId) {
+          return { outcome: 'not_found' } as const;
+        }
 
         // Checked before capacity, so a member who already redeemed is idempotent
         // even when the invite has since filled up. Reporting "exhausted" to
