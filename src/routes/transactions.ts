@@ -65,10 +65,9 @@ const prepareBody = z.object({
 });
 
 /**
- * A budget for `/prepare` of the caller's own, rather than a share of everyone's.
-/**
  * Rate limit configuration for `/transactions/prepare`.
  *
+ * A budget for `/prepare` of the caller's own, rather than a share of everyone's.
  * This is the one route that spends the service's RPC quota.
  *
  * An unauthenticated caller must not be able to bypass rate limits by rotating
