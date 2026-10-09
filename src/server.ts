@@ -18,7 +18,7 @@ import { createNotificationReadModel, type NotificationReadModel } from './db/no
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
-import { getDb } from './db/client';
+import { closeDb, getDb } from './db/client';
 import { createRequireAuth } from './auth/guard';
 import { createTokenVerifier, type TokenVerifier } from './auth/verify';
 import {
@@ -54,6 +54,14 @@ export type BuildServerOptions = {
   notificationReadModel?: NotificationReadModel;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
+  /**
+   * Ends the database pool when the server closes.
+   *
+   * Defaults to the real `closeDb`, which ends the process-wide pool `getDb`
+   * builds. Injectable so a lifecycle test can observe the hook without a
+   * database; production passes nothing.
+   */
+  closeDatabase?: () => Promise<void>;
   trustProxy?: FastifyServerOptions['trustProxy'];
   rateLimitMax?: number;
 };
@@ -270,6 +278,18 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   if (options.walletLinkStore === undefined) {
     startNonceReaping(walletLinkStore, app.log);
   }
+
+  // The connection pool is process-wide and built lazily by `getDb()`, so
+  // nothing else owns its lifetime: `index.ts` would have to remember to await
+  // it after `app.close()`, and an embedder — a test, a worker, a script that
+  // builds the app and listens on its own — would have no reason to know the
+  // pool exists at all. Closing it here makes `app.close()` the single point at
+  // which the service is finished: in-flight queries drain, and a tick that runs
+  // after the server is gone cannot open a fresh pool behind it.
+  const closeDatabase = options.closeDatabase ?? closeDb;
+  app.addHook('onClose', async () => {
+    await closeDatabase();
+  });
 
   return app;
 }

@@ -56,9 +56,16 @@ export function getDb(): NodePgDatabase<typeof schema> {
 }
 
 export async function closeDb(): Promise<void> {
-  if (pool !== undefined) {
-    await pool.end();
-    pool = undefined;
-    database = undefined;
+  // The reference is dropped before the pool is awaited, not after. Several
+  // servers can share this one pool — every `buildServer` registers the hook —
+  // and Fastify closes an app's hooks concurrently, so two callers that both
+  // saw a live pool would each call `end` and `pg` would refuse the second.
+  // Taking it here makes the first caller the only one that ends it, and the
+  // others resolve immediately.
+  const closing = pool;
+  pool = undefined;
+  database = undefined;
+  if (closing !== undefined) {
+    await closing.end();
   }
 }
