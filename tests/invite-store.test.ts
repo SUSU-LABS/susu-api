@@ -318,3 +318,36 @@ describe('the claim check no longer runs under the row lock', () => {
     expect(await redemptionCount(invite.id)).toBe(users.length);
   });
 });
+
+describe('a claim targeting the wrong group', () => {
+  it('returns not_found and writes nothing when expectedGroup does not match', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: OTHER_CONTRACT_ID,
+    });
+
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+
+    // A subsequent redemption targeting the matching group succeeds and spends the use
+    const genuine = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: GROUP_CONTRACT_ID,
+    });
+
+    expect(genuine).toMatchObject({
+      outcome: 'redeemed',
+      claimed: true,
+      groupContractId: GROUP_CONTRACT_ID,
+    });
+    expect(await usesOf(invite.id)).toBe(1);
+    expect(await redemptionCount(invite.id)).toBe(1);
+  });
+});
