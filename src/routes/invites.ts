@@ -152,6 +152,12 @@ export async function inviteRoutes(
     const result = await store.redeem({
       code,
       userId: user.id,
+      // The join shape supplies the group from the path; the plain redeem shape
+      // has none, so it is left out rather than sent as an empty string. The
+      // store answers a mismatch with `not_found` before it writes anything, so
+      // a client bug cannot spend one of a limited invite's uses on a join that
+      // never happens.
+      expectedGroupContractId: expectedGroup,
       // A code shared before the group started keeps working after it has, and
       // the chain refuses a join unless the group is still open — so treating
       // "the group has moved on" as a reason to spend a use bills the visitor for
@@ -168,10 +174,13 @@ export async function inviteRoutes(
 
     switch (result.outcome) {
       case 'redeemed':
-        // The code names the group. A caller that supplied a different one asked
-        // about the wrong group, which is answered the same way as an unknown
-        // code: the code is not for that group, and saying so confirms nothing
-        // about codes in general.
+        // The store already refuses a mismatched group before it writes anything,
+        // so by here the code is for this group or the outcome was `not_found`.
+        // This stays as the response-level guard: the shape of the answer must not
+        // depend on an individual store honouring `expectedGroupContractId`, and
+        // `claimed: false` still reports the group the code really belongs to.
+        // Answered the same way as an unknown code: the code is not for that
+        // group, and saying so confirms nothing about codes in general.
         if (expectedGroup !== undefined && result.groupContractId !== expectedGroup) {
           return inviteNotFound(reply);
         }
