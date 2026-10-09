@@ -517,6 +517,7 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroup: GROUP_CONTRACT_ID,
       shouldClaim: expect.any(Function),
     });
   });
