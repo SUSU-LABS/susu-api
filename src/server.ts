@@ -18,7 +18,7 @@ import { createNotificationReadModel, type NotificationReadModel } from './db/no
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
-import { getDb } from './db/client';
+import { closeDb, getDb } from './db/client';
 import { createRequireAuth } from './auth/guard';
 import { createTokenVerifier, type TokenVerifier } from './auth/verify';
 import {
@@ -54,6 +54,24 @@ export type BuildServerOptions = {
   notificationReadModel?: NotificationReadModel;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
+  /**
+   * Ends the database pool when the server closes.
+   *
+   * Defaults to the real `closeDb`, which ends the process-wide pool `getDb`
+   * builds. Injectable so a lifecycle test can observe the hook without a
+   * database; production passes nothing.
+   */
+  closeDatabase?: () => Promise<void>;
+  /**
+   * Starts the spent-nonce reaper on this interval.
+   *
+   * Left out, no timer is started at all. That is the default for every caller
+   * except the process entrypoint, so a test that builds a server gets no
+   * background work it did not ask for, and one that does want it can drive
+   * `startNonceReaping` directly with its own clock. `index.ts` passes
+   * `NONCE_REAP_INTERVAL_MS`.
+   */
+  nonceReapIntervalMs?: number;
   trustProxy?: FastifyServerOptions['trustProxy'];
   rateLimitMax?: number;
 };
@@ -263,19 +281,41 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     });
   });
 
-  // Started only when the store was not injected, which is the same condition as
-  // "this is the real service": a test that supplies a store does not want a
-  // background timer, and one that does not will not live long enough to see
-  // this fire.
-  if (options.walletLinkStore === undefined) {
-    startNonceReaping(walletLinkStore, app.log);
+  // The reaper belongs to the server, so the timer is cleared when the server
+  // closes. It used to be started unconditionally whenever the wallet store was
+  // not injected, with its handle discarded: a closed server kept a live
+  // interval behind it, which in a test process meant a tick long after the app
+  // was gone could lazily create a real database pool and query through it.
+  // Nothing starts it now unless the caller asked for it.
+  if (options.nonceReapIntervalMs !== undefined) {
+    const reapTimer = startNonceReaping(walletLinkStore, app.log, options.nonceReapIntervalMs);
+    app.addHook('onClose', async () => {
+      clearInterval(reapTimer);
+    });
   }
+
+  // The connection pool is process-wide and built lazily by `getDb()`, so
+  // nothing else owns its lifetime: `index.ts` would have to remember to await
+  // it after `app.close()`, and an embedder — a test, a worker, a script that
+  // builds the app and listens on its own — would have no reason to know the
+  // pool exists at all. Closing it here makes `app.close()` the single point at
+  // which the service is finished: in-flight queries drain, and a tick that runs
+  // after the server is gone cannot open a fresh pool behind it.
+  const closeDatabase = options.closeDatabase ?? closeDb;
+  app.addHook('onClose', async () => {
+    await closeDatabase();
+  });
 
   return app;
 }
 
-/** How often spent nonces are cleared. Well inside the five-minute nonce lifetime. */
-const REAP_INTERVAL_MS = 15 * 60 * 1000;
+/**
+ * How often spent nonces are cleared. Well inside the five-minute nonce lifetime.
+ *
+ * Exported because the reaper is only started when a caller asks for it, and the
+ * process entrypoint is the caller that asks.
+ */
+export const NONCE_REAP_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
  * Clears spent nonces whose expiry has passed, on a timer.
@@ -297,7 +337,7 @@ const REAP_INTERVAL_MS = 15 * 60 * 1000;
 export function startNonceReaping(
   store: Pick<WalletLinkStore, 'reap'>,
   log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
-  intervalMs: number = REAP_INTERVAL_MS,
+  intervalMs: number = NONCE_REAP_INTERVAL_MS,
 ): ReturnType<typeof setInterval> {
   const timer = setInterval(() => {
     store
