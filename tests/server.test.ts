@@ -395,3 +395,71 @@ describe('the nonce reaper belongs to the server', () => {
     }
   });
 });
+
+describe('the notification sweep runs without pg_cron', () => {
+  it('schedules the sweeper on the interval, and stops when the server closes', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => ({ events: 0, written: 0, rounds: 0 }));
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        notificationSweepIntervalMs: 1_000,
+        notificationSweeper: { sweep },
+      });
+
+      // `pg_cron` is not present here either — the schedule is the app's, and it
+      // is what a database without the extension would get.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+
+      await app.close();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('derives through the same SQL function, rather than restating the query', async () => {
+    const { startNotificationSweep } = await import('../src/server');
+    const { createNotificationSweeper } = await import('../src/db/notification-sweep');
+
+    const execute = vi.fn(async () => ({ rows: [{ events: 0, written: 0, rounds: 0 }] }));
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const sweeper = createNotificationSweeper({ execute } as never);
+
+    vi.useFakeTimers();
+    const timer = startNotificationSweep(sweeper, log as never, 1_000);
+    try {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(log.warn).not.toHaveBeenCalled();
+    } finally {
+      clearInterval(timer);
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not started for a caller that did not ask for it', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => ({ events: 0, written: 0, rounds: 0 }));
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        notificationSweeper: { sweep },
+      });
+
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(sweep).not.toHaveBeenCalled();
+
+      await app.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

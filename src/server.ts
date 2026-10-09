@@ -16,6 +16,7 @@ import { createInviteStore, type InviteStore } from './db/invites';
 import { createRegistrationStore, type RegistrationStore } from './db/registrations';
 import { createNotificationReadModel, type NotificationReadModel } from './db/notifications';
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
+import { createNotificationSweeper, type NotificationSweeper } from './db/notification-sweep';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
 import { closeDb, getDb } from './db/client';
@@ -72,6 +73,20 @@ export type BuildServerOptions = {
    * `NONCE_REAP_INTERVAL_MS`.
    */
   nonceReapIntervalMs?: number;
+  /**
+   * Runs `derive_notifications` on this interval — the application's fallback
+   * for a database whose migration could not reach `pg_cron`.
+   *
+   * Left out, no timer is started. `index.ts` passes
+   * `NOTIFICATION_SWEEP_INTERVAL_MS`. The derivation itself is not restated
+   * here: the timer calls the same sweeper the cron job would.
+   */
+  notificationSweepIntervalMs?: number;
+  /**
+   * Which sweeper to run. Defaults to `createNotificationSweeper(getDb())`;
+   * only tests override it, to observe the schedule without a database.
+   */
+  notificationSweeper?: NotificationSweeper;
   trustProxy?: FastifyServerOptions['trustProxy'];
   rateLimitMax?: number;
 };
@@ -294,6 +309,25 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     });
   }
 
+  // The derivation lives in SQL, and `drizzle/0006_notification_schedule.sql`
+  // schedules it with `pg_cron` when `pg_cron` is there. That migration
+  // deliberately tolerates one that is not — a developer's database, or CI —
+  // and on such a database nobody has ever received a notification: no job ran,
+  // no error surfaced, and the feed stayed empty. This is the fallback, and it
+  // is the same function cron would call, idempotent by event identity, so
+  // having both is harmless.
+  if (options.notificationSweepIntervalMs !== undefined) {
+    const sweeper = options.notificationSweeper ?? createNotificationSweeper(getDb());
+    const sweepTimer = startNotificationSweep(
+      sweeper,
+      app.log,
+      options.notificationSweepIntervalMs,
+    );
+    app.addHook('onClose', async () => {
+      clearInterval(sweepTimer);
+    });
+  }
+
   // The connection pool is process-wide and built lazily by `getDb()`, so
   // nothing else owns its lifetime: `index.ts` would have to remember to await
   // it after `app.close()`, and an embedder — a test, a worker, a script that
@@ -316,6 +350,15 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
  * process entrypoint is the caller that asks.
  */
 export const NONCE_REAP_INTERVAL_MS = 15 * 60 * 1000;
+
+/**
+ * How often the application derives notifications itself.
+ *
+ * One minute, so a database that has `pg_cron` and one that does not produce
+ * notifications at the same rate. Exported for the same reason: the entrypoint
+ * is the caller that asks.
+ */
+export const NOTIFICATION_SWEEP_INTERVAL_MS = 60 * 1000;
 
 /**
  * Clears spent nonces whose expiry has passed, on a timer.
@@ -349,6 +392,57 @@ export function startNonceReaping(
       })
       .catch((error: unknown) => {
         log.warn({ event: 'nonce_reap_failed', err: error }, 'could not clear expired nonces');
+      });
+  }, intervalMs);
+
+  // Housekeeping must never be the reason the process stays alive.
+  timer.unref();
+
+  return timer;
+}
+
+/**
+ * Running `derive_notifications` from the application.
+ *
+ * THE DEFINITION IS STILL IN SQL, AND THIS ONLY CALLS IT
+ * `drizzle/0006_notification_schedule.sql` creates `public.derive_notifications`
+ * and, when `pg_cron` is installed, schedules it every minute. That migration
+ * guards against a database without `pg_cron` — a developer's, or CI — by
+ * raising a notice instead of failing, which is right for a migration and wrong
+ * as a resting place for production: on such a database no job ever runs, and
+ * members simply never see a notification. This is the second caller, so the
+ * schedule no longer depends on an extension being present. It calls the same
+ * function rather than restating the query, because two implementations of
+ * "who should be told" is a bug waiting to happen silently.
+ *
+ * WHY BOTH CALLERS AT ONCE IS SAFE
+ * Every derived row carries the `event_identity` it came from and a unique
+ * index over `(user_id, kind, source_event_identity)` refuses a second copy, so
+ * cron and this timer may overlap freely. Idempotence by identity is what makes
+ * an opportunistic extra run harmless where a watermark would make it skip.
+ *
+ * A failure is logged and left for the next tick: derivation is housekeeping,
+ * and a service that is mid-deploy has no business failing a health check
+ * because a notification pass could not connect.
+ */
+export function startNotificationSweep(
+  sweeper: NotificationSweeper,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+  intervalMs: number = NOTIFICATION_SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweeper
+      .sweep()
+      .then((result) => {
+        if (result.written > 0) {
+          log.info({ event: 'notification_sweep', ...result }, 'derived notifications');
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn(
+          { event: 'notification_sweep_failed', err: error },
+          'could not derive notifications',
+        );
       });
   }, intervalMs);
 

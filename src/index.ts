@@ -1,4 +1,4 @@
-import { buildServer, NONCE_REAP_INTERVAL_MS } from './server';
+import { buildServer, NONCE_REAP_INTERVAL_MS, NOTIFICATION_SWEEP_INTERVAL_MS } from './server';
 import { getEnv } from './lib/env';
 
 /**
@@ -9,10 +9,15 @@ import { getEnv } from './lib/env';
  */
 async function main(): Promise<void> {
   const env = getEnv();
-  // The only caller that starts the spent-nonce reaper. Everything else — tests
-  // above all — builds a server with no background timers unless it asks, and
-  // the timer that is started here is cleared when the server closes.
-  const app = await buildServer({ nonceReapIntervalMs: NONCE_REAP_INTERVAL_MS });
+  // The only caller that starts background housekeeping: the spent-nonce reaper,
+  // and the notification sweep that stands in for `pg_cron` on a database that
+  // has none. Everything else — tests above all — builds a server with no timers
+  // unless it asks, and each timer started here is cleared when the server
+  // closes.
+  const app = await buildServer({
+    nonceReapIntervalMs: NONCE_REAP_INTERVAL_MS,
+    notificationSweepIntervalMs: NOTIFICATION_SWEEP_INTERVAL_MS,
+  });
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
