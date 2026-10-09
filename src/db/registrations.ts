@@ -79,6 +79,35 @@ export type RegistrationStore = {
   isRegistered(contractId: string): Promise<boolean>;
 };
 
+/**
+ * Reads the current `expires_at` for a contract. Used only for defensive
+ * fallbacks when a row vanished between a read and a write — the happy paths
+ * return the value from `returning()`.
+ *
+ * If the row is gone, returns what a fresh registration would get (`now() +
+ * TTL` on the database clock), not the bare `now()`: the caller is about to
+ * report a `registered` outcome, and an expiry of "right now" would describe
+ * a claim that is already dead. The database clock is used so the
+ * single-clock property (susu-api#58) holds on this path too.
+ *
+ * Exported for tests: the race it covers is not reachable through the public
+ * API without pausing between two statements.
+ */
+export async function readExpiresAt(db: Database, contractId: string): Promise<Date> {
+  const rows = await db
+    .select({ expiresAt: groupRegistrations.expiresAt })
+    .from(groupRegistrations)
+    .where(eq(groupRegistrations.contractId, contractId));
+  if (rows[0]?.expiresAt !== undefined) return rows[0].expiresAt;
+  // The row vanished concurrently; recompute from the database clock rather
+  // than the application clock.
+  const expRows = await db.execute<{ expiresAt: string }>(
+    sql`select (now() + (${REGISTRATION_TTL_MS} * interval '1 millisecond'))::text as "expiresAt"`,
+  );
+  const expStr = expRows.rows[0]?.expiresAt;
+  return expStr !== undefined ? new Date(expStr) : new Date();
+}
+
 export function createRegistrationStore(db: Database): RegistrationStore {
   async function countLive(userId: string): Promise<number> {
     const rows = await db
@@ -110,7 +139,16 @@ export function createRegistrationStore(db: Database): RegistrationStore {
           ),
         );
 
-      const expiresAt = new Date(Date.now() + REGISTRATION_TTL_MS);
+      // The expiry is computed by the database (`now() + interval`), not the
+      // application clock. `created_at` defaults to the database's `now()`,
+      // and `isRegistered`/expiry checks compare against `now()` too — using
+      // `Date.now()` here would let host clock skew shift the window or even
+      // violate `group_registrations_window_positive`.
+      // Written as `TTL * interval '1 millisecond'` rather than
+      // `make_interval(secs => ...)`: a plain interval product with no
+      // named-notation function call, so there is nothing for a driver to
+      // misread and no implicit behaviour to depend on.
+      const expiresAtSql = sql`now() + (${REGISTRATION_TTL_MS} * interval '1 millisecond')`;
 
       // The cap is checked against the claim being *replaced*, so re-registering
       // an address an account already holds is never refused for being at the
@@ -128,7 +166,7 @@ export function createRegistrationStore(db: Database): RegistrationStore {
       if (alreadyMine) {
         const updated = await db
           .update(groupRegistrations)
-          .set({ expiresAt })
+          .set({ expiresAt: expiresAtSql })
           .where(
             and(
               eq(groupRegistrations.contractId, contractId),
@@ -140,10 +178,15 @@ export function createRegistrationStore(db: Database): RegistrationStore {
           )
           .returning({ expiresAt: groupRegistrations.expiresAt });
 
+        // `updated[0]` is undefined only if the row vanished between the read
+        // and the write (it was ours, so the WHERE matched). Re-read the
+        // current expiry from the database rather than guessing with the
+        // application clock.
+        const current = updated[0]?.expiresAt ?? (await readExpiresAt(db, contractId));
         return {
           outcome: 'registered',
           contractId,
-          expiresAt: (updated[0]?.expiresAt ?? expiresAt).toISOString(),
+          expiresAt: current.toISOString(),
         } as const;
       }
 
@@ -152,7 +195,7 @@ export function createRegistrationStore(db: Database): RegistrationStore {
       // existing holder keeps it and this account learns it is registered.
       const inserted = await db
         .insert(groupRegistrations)
-        .values({ contractId, registeredBy: userId, expiresAt })
+        .values({ contractId, registeredBy: userId, expiresAt: expiresAtSql })
         .onConflictDoNothing({ target: groupRegistrations.contractId })
         .returning({ expiresAt: groupRegistrations.expiresAt });
 
@@ -169,10 +212,13 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         .from(groupRegistrations)
         .where(eq(groupRegistrations.contractId, contractId));
 
+      // The row must exist: the insert conflicted on it. If it vanished in
+      // the meantime, re-read rather than guessing with the app clock.
+      const holderExpiresAt = holder[0]?.expiresAt ?? (await readExpiresAt(db, contractId));
       return {
         outcome: 'registered',
         contractId,
-        expiresAt: (holder[0]?.expiresAt ?? expiresAt).toISOString(),
+        expiresAt: holderExpiresAt.toISOString(),
       } as const;
     },
 

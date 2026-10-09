@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createRegistrationStore,
   MAX_LIVE_REGISTRATIONS,
+  readExpiresAt,
   REGISTRATION_TTL_MS,
   type RegistrationStore,
 } from '../src/db/registrations';
@@ -190,5 +191,65 @@ describe('createRegistrationStore.register', () => {
     // Refusing here would be a bug the user hits by refreshing the page.
     const result = await store.register({ contractId, userId: USER_ONE });
     expect(result.outcome).toBe('registered');
+  });
+});
+
+describe('single-clock expiry (susu-api#58)', () => {
+  it('computes expires_at from the database clock, not the application clock', async () => {
+    // Skew the application clock forward by an hour. With the old
+    // `Date.now() + TTL` computation, expires_at would land 90 minutes after
+    // the database's now(); with the fix it is now() + 30 minutes.
+    const realNow = Date.now();
+    const skewMs = 60 * 60 * 1000;
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(realNow + skewMs);
+    try {
+      const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
+      expect(result.outcome).toBe('registered');
+      if (result.outcome !== 'registered') throw new Error('expected registration');
+
+      const { rows } = await testDb.query(
+        'select created_at, expires_at from public.group_registrations where contract_id = $1',
+        [GROUP_CONTRACT_ID],
+      );
+      const createdAt = new Date(rows[0].created_at as string).getTime();
+      const expiresAt = new Date(rows[0].expires_at as string).getTime();
+      const windowMs = expiresAt - createdAt;
+
+      // The window must be the documented TTL, not TTL + skew.
+      expect(windowMs).toBeGreaterThanOrEqual(REGISTRATION_TTL_MS - 5_000);
+      expect(windowMs).toBeLessThanOrEqual(REGISTRATION_TTL_MS + 5_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('never violates the window-positive check constraint under skew', async () => {
+    // Skew the application clock *backward* by an hour. Old code would write
+    // expires_at = now() - 30min < created_at = now(), violating
+    // group_registrations_window_positive and turning the registration
+    // into a 500.
+    const realNow = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(realNow - 60 * 60 * 1000);
+    try {
+      const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
+      expect(result.outcome).toBe('registered');
+      expect(await store.isRegistered(GROUP_CONTRACT_ID)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('readExpiresAt falls back to a fresh database-clock expiry, not now()', async () => {
+    // The defensive fallback runs when a row vanished between a read and a
+    // write. Reporting `now()` there would describe a claim that is already
+    // dead; the fallback must be what a fresh registration would get.
+    const missing = distinctContractId(99);
+    const before = Date.now();
+    const fallback = await readExpiresAt(testDb.db, missing);
+    const after = Date.now();
+
+    const ms = fallback.getTime();
+    expect(ms).toBeGreaterThanOrEqual(before + REGISTRATION_TTL_MS - 5_000);
+    expect(ms).toBeLessThanOrEqual(after + REGISTRATION_TTL_MS + 5_000);
   });
 });
