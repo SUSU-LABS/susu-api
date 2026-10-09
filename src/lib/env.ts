@@ -16,69 +16,97 @@ export const PROTOCOL_FEE_BPS_MVP = 50;
 const contractIdSchema = z.union([z.string().regex(/^C[A-Z2-7]{55}$/), z.literal('')]);
 const accountIdSchema = z.union([z.string().regex(/^G[A-Z2-7]{55}$/), z.literal('')]);
 
-export const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().max(65535).default(3000),
-  HOST: z.string().min(1).default('0.0.0.0'),
+export const envSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    PORT: z.coerce.number().int().positive().max(65535).default(3000),
+    HOST: z.string().min(1).default('0.0.0.0'),
 
-  // Database. The API holds no custody; the database is a rebuildable index.
-  DATABASE_URL: z
-    .string()
-    .refine(
-      (value) => value.startsWith('postgres://') || value.startsWith('postgresql://'),
-      'must be a postgres:// or postgresql:// connection string',
-    ),
-  // PEM contents of the database server's CA. Optional, but see
-  // DATABASE_SSL_ALLOW_UNVERIFIED below: without it, or that flag, the API
-  // refuses to start rather than connecting to a server it cannot authenticate.
-  // Supabase publishes its CA at Project Settings -> Database -> SSL
-  // configuration. Server-only, like everything here.
-  DATABASE_SSL_CA: z.string().optional(),
-  // Explicit acknowledgement that the database server will not be authenticated.
-  // Named for what it permits: setting it accepts a machine-in-the-middle risk,
-  // it does not enable a feature. See `src/db/ssl.ts` for why Supabase cannot be
-  // verified with the default trust store.
-  DATABASE_SSL_ALLOW_UNVERIFIED: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((value) => value === 'true'),
-  SUPABASE_URL: z.string().url(),
-  // Server-only. Never exposed to the browser.
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+    // Database. The API holds no custody; the database is a rebuildable index.
+    DATABASE_URL: z
+      .string()
+      .refine(
+        (value) => value.startsWith('postgres://') || value.startsWith('postgresql://'),
+        'must be a postgres:// or postgresql:// connection string',
+      ),
+    // PEM contents of the database server's CA. Optional, but see
+    // DATABASE_SSL_ALLOW_UNVERIFIED below: without it, or that flag, the API
+    // refuses to start rather than connecting to a server it cannot authenticate.
+    // Supabase publishes its CA at Project Settings -> Database -> SSL
+    // configuration. Server-only, like everything here.
+    DATABASE_SSL_CA: z.string().optional(),
+    // Explicit acknowledgement that the database server will not be authenticated.
+    // Named for what it permits: setting it accepts a machine-in-the-middle risk,
+    // it does not enable a feature. See `src/db/ssl.ts` for why Supabase cannot be
+    // verified with the default trust store.
+    DATABASE_SSL_ALLOW_UNVERIFIED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    SUPABASE_URL: z.string().url(),
+    // Server-only. Never exposed to the browser.
+    SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
 
-  // Stellar. Testnet by default; Mainnet requires explicit opt-in.
-  STELLAR_NETWORK: z.enum(['local', 'testnet', 'mainnet']),
-  STELLAR_RPC_URL: z.string().url(),
-  STELLAR_NETWORK_PASSPHRASE: z.string().min(1),
-  FACTORY_CONTRACT_ID: contractIdSchema,
-  USDC_CONTRACT_ID: contractIdSchema,
-  TREASURY_ADDRESS: accountIdSchema,
+    // Stellar. Testnet by default; Mainnet requires explicit opt-in.
+    STELLAR_NETWORK: z.enum(['local', 'testnet', 'mainnet']),
+    STELLAR_RPC_URL: z.string().url(),
+    STELLAR_NETWORK_PASSPHRASE: z.string().min(1),
+    FACTORY_CONTRACT_ID: contractIdSchema,
+    USDC_CONTRACT_ID: contractIdSchema,
+    TREASURY_ADDRESS: accountIdSchema,
 
-  // Must match the contract. Enforced below.
-  PROTOCOL_FEE_BPS: z.coerce.number().int().positive(),
+    // Must match the contract. Enforced below.
+    PROTOCOL_FEE_BPS: z.coerce.number().int().positive(),
 
-  // Single-use, expiring wallet-link nonces.
-  WALLET_NONCE_SECRET: z.string().min(32),
+    // Single-use, expiring wallet-link nonces.
+    WALLET_NONCE_SECRET: z.string().min(32),
 
-  // Explicit opt-in required before the API may be pointed at Mainnet.
-  ALLOW_MAINNET: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((value) => value === 'true'),
+    // Explicit opt-in required before the API may be pointed at Mainnet.
+    ALLOW_MAINNET: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
 
-  // Comma-separated allowlist. Empty means no cross-origin access.
-  CORS_ALLOWED_ORIGINS: z.string().default(''),
+    // Comma-separated allowlist. Empty means no cross-origin access.
+    CORS_ALLOWED_ORIGINS: z.string().default(''),
 
-  // Comma-separated list of trusted proxy CIDRs (e.g. Render private ranges).
-  // Empty means no proxies are trusted (trustProxy: false), preventing header spoofing.
-  TRUSTED_PROXY_CIDRS: z.string().default(''),
+    // Comma-separated list of trusted proxy CIDRs (e.g. Render private ranges).
+    // Empty means no proxies are trusted (trustProxy: false), preventing header spoofing.
+    TRUSTED_PROXY_CIDRS: z.string().default(''),
 
-  // Optional S3-compatible storage. Server-only credentials.
-  S3_ENDPOINT: z.string().url().optional(),
-  S3_REGION: z.string().optional(),
-  S3_ACCESS_KEY_ID: z.string().optional(),
-  S3_SECRET_ACCESS_KEY: z.string().optional(),
-});
+    // Optional S3-compatible storage. Server-only credentials.
+    S3_ENDPOINT: z.string().url().optional(),
+    S3_REGION: z.string().optional(),
+    S3_ACCESS_KEY_ID: z.string().optional(),
+    S3_SECRET_ACCESS_KEY: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.NODE_ENV === 'production') {
+      try {
+        if (new URL(data.SUPABASE_URL).protocol !== 'https:') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['SUPABASE_URL'],
+            message: 'must use https:// in production',
+          });
+        }
+      } catch {
+        // z.string().url() already validates URL syntax
+      }
+
+      try {
+        if (new URL(data.STELLAR_RPC_URL).protocol !== 'https:') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['STELLAR_RPC_URL'],
+            message: 'must use https:// in production',
+          });
+        }
+      } catch {
+        // z.string().url() already validates URL syntax
+      }
+    }
+  });
 
 export type Env = z.infer<typeof envSchema>;
 
