@@ -14,6 +14,9 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
     try {
+      // Waits for the server's `onClose` hooks, which include ending the
+      // database pool — so the process is not exited from under an in-flight
+      // query, and the pool is never left open behind a closed server.
       await app.close();
       process.exit(0);
     } catch (error) {

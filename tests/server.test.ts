@@ -301,3 +301,46 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('the database pool is closed with the server', () => {
+  it('is ended by app.close(), the shutdown path everything waits for', async () => {
+    const { buildServer } = await import('../src/server');
+    const { getPool } = await import('../src/db/client');
+
+    // No store is injected, so this app is built on the real, process-wide pool
+    // that `getDb()` creates lazily — the one nothing else was closing.
+    const app = await buildServer({ probeDatabase: async () => {} });
+    const pool = getPool();
+
+    expect(pool.ended).toBe(false);
+
+    await app.close();
+
+    expect(pool.ended).toBe(true);
+  });
+
+  it('resolves only once the pool has closed', async () => {
+    const { buildServer } = await import('../src/server');
+
+    let finish: () => void = () => {};
+    const drained = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const closeDatabase = vi.fn(() => drained);
+    const app = await buildServer({ probeDatabase: async () => {}, closeDatabase });
+
+    const closed = app.close();
+    const settled = await Promise.race([
+      closed.then(() => 'closed' as const),
+      new Promise((resolve) => setTimeout(() => resolve('in-flight' as const), 50)),
+    ]);
+
+    // `index.ts` exits as soon as this promise settles, so a close that reported
+    // success while the pool was still draining would cut an in-flight query off.
+    expect(settled).toBe('in-flight');
+
+    finish();
+    await closed;
+    expect(closeDatabase).toHaveBeenCalledTimes(1);
+  });
+});
