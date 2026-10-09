@@ -37,12 +37,41 @@
  * for the case where the code and the group came from different places.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { authenticatedUser } from '../auth/guard';
 import { generateInviteCode, isWellFormedInviteCode } from '../lib/invite-code';
 import type { InviteStore } from '../db/invites';
 import type { GroupStatus } from '../db/groups';
 import { invalidRequest } from './errors';
+
+/**
+ * Per-account rate limit for invite creation.
+ *
+ * Creating an invite writes a row to `invite_links`. Without a per-account
+ * budget, any authenticated caller can mint codes without bound, sharing only
+ * the global 100/min IP budget. Twenty creations a minute is generous for a
+ * human inviting people to a group, and tight enough to make bulk minting
+ * expensive.
+ *
+ * Keyed on a hash of the bearer token rather than `request.user.id` because
+ * the rate-limit hook runs before the auth preHandler. A token identifies the
+ * session, and a session belongs to one account.
+ */
+const CREATE_INVITE_RATE_LIMIT = {
+  max: 20,
+  timeWindow: '1 minute',
+  keyGenerator: (request: FastifyRequest): string => {
+    const header = request.headers.authorization;
+    if (typeof header === 'string' && header.startsWith('Bearer ')) {
+      const digest = createHash('sha256').update(header.slice('Bearer '.length)).digest('hex');
+      return `invite-creator:${digest.slice(0, 32)}`;
+    }
+    // Unreachable while the route requires authentication, and kept so that the
+    // limiter still has a key if the guard is ever moved or made optional.
+    return `invite-creator:ip:${request.ip}`;
+  },
+} as const;
 
 /** A Soroban contract address. Matches the group routes' pattern. */
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
@@ -193,7 +222,15 @@ export async function inviteRoutes(
     }
   }
 
-  app.post('/groups/:contractId/invites', { preHandler: requireAuth }, async (request, reply) => {
+  app.post(
+    '/groups/:contractId/invites',
+    {
+      preHandler: requireAuth,
+      // Replaces the global budget for this route rather than adding to it:
+      // invite creation is per-account, not per-IP.
+      config: { rateLimit: CREATE_INVITE_RATE_LIMIT },
+    },
+    async (request, reply) => {
     const parsedParams = params.safeParse(request.params);
     if (!parsedParams.success) return invalidRequest(reply, parsedParams.error);
 
