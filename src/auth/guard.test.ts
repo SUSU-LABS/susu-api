@@ -42,6 +42,54 @@ describe('createRequireAuth', () => {
     await app.close();
   });
 
+  it('admits a request with a lowercase bearer scheme', async () => {
+    const verify = accepting();
+    const app = await appWith(verify);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/private',
+      headers: { authorization: 'bearer a-good-token' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ user: USER });
+    expect(verify).toHaveBeenCalledWith('a-good-token');
+    await app.close();
+  });
+
+  it('admits a request with an uppercase BEARER scheme or mixed-case scheme', async () => {
+    const verify = accepting();
+    const app = await appWith(verify);
+    const responseUpper = await app.inject({
+      method: 'GET',
+      url: '/private',
+      headers: { authorization: 'BEARER a-good-token' },
+    });
+    expect(responseUpper.statusCode).toBe(200);
+
+    const responseMixed = await app.inject({
+      method: 'GET',
+      url: '/private',
+      headers: { authorization: 'bEaReR a-good-token' },
+    });
+    expect(responseMixed.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('refuses an authorization header with scheme only and no space separator', async () => {
+    const verify = accepting();
+    const app = await appWith(verify);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/private',
+      headers: { authorization: 'bearer' },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(verify).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it('passes the token through to the verifier unchanged', async () => {
     const verify = accepting();
     const app = await appWith(verify);
