@@ -48,6 +48,7 @@ beforeEach(async () => {
   // cascades to `group_members`.
   await test.exec(`
     delete from public.notifications;
+    delete from public.notification_examined;
     delete from public.decoded_events;
     delete from public.groups;
     delete from public.wallet_links;
@@ -468,5 +469,61 @@ describe('the notification sweep', () => {
     const result = await createNotificationSweeper(test.db).sweep();
 
     expect(result.written).toBe(1);
+  });
+
+  it('does not starve behind events with no linked wallet', async () => {
+    // Three events whose subject wallet is not linked: they can never produce
+    // a notification, so without tombstoning they are reselected every round
+    // and the sweep never reaches the addressable event behind them.
+    await event({
+      identity: 'evt-unaddr-1',
+      name: 'contribution',
+      ledger: 100,
+      payload: { member: STRANGER, round: 1, amount: '1' },
+    });
+    await event({
+      identity: 'evt-unaddr-2',
+      name: 'contribution',
+      ledger: 101,
+      payload: { member: STRANGER, round: 1, amount: '1' },
+    });
+    await event({
+      identity: 'evt-unaddr-3',
+      name: 'contribution',
+      ledger: 102,
+      payload: { member: STRANGER, round: 1, amount: '1' },
+    });
+
+    await link(USER_A, ALICE);
+    await event({
+      identity: 'evt-addr',
+      name: 'contribution',
+      ledger: 103,
+      payload: { member: ALICE, round: 1, amount: '50000000' },
+    });
+
+    // batchSize 3: the first round sees only the three unaddressable events.
+    // Without the fix, every round reselects the same three and the
+    // addressable event is never reached.
+    const first = await createNotificationSweeper(test.db).sweep({ batchSize: 3 });
+
+    expect(first.written).toBe(1);
+    const rows = await notifications();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ user_id: USER_A, kind: 'contribution_confirmed' });
+
+    // The unaddressable events were examined once and tombstoned.
+    const { rows: tombstoned } = await test.query(
+      'select event_identity from public.notification_examined order by event_identity',
+    );
+    expect(tombstoned.map((r) => r.event_identity)).toEqual([
+      'evt-unaddr-1',
+      'evt-unaddr-2',
+      'evt-unaddr-3',
+    ]);
+
+    // A second sweep finds nothing left to do.
+    const second = await createNotificationSweeper(test.db).sweep({ batchSize: 3 });
+    expect(second).toEqual({ events: 0, written: 0, rounds: 0 });
   });
 });
