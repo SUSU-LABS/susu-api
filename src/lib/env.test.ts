@@ -212,4 +212,49 @@ describe('parseEnv', () => {
     );
     expect(envConfigured.TRUSTED_PROXY_CIDRS).toBe('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16');
   });
+
+  it('rejects http:// SUPABASE_URL in production', () => {
+    expect(() =>
+      parseEnv(
+        validEnv({
+          NODE_ENV: 'production',
+          SUPABASE_URL: 'http://example.supabase.co',
+        }),
+      ),
+    ).toThrow(/SUPABASE_URL must use https:\/\/ in production/);
+  });
+
+  it('rejects http:// STELLAR_RPC_URL in production', () => {
+    expect(() =>
+      parseEnv(
+        validEnv({
+          NODE_ENV: 'production',
+          STELLAR_RPC_URL: 'http://soroban-testnet.stellar.org',
+        }),
+      ),
+    ).toThrow(/STELLAR_RPC_URL must use https:\/\/ in production/);
+  });
+
+  it('allows http:// SUPABASE_URL and STELLAR_RPC_URL in non-production environments', () => {
+    const envTest = parseEnv(
+      validEnv({
+        NODE_ENV: 'test',
+        SUPABASE_URL: 'http://localhost:54321',
+        STELLAR_RPC_URL: 'http://localhost:8000',
+      }),
+    );
+    expect(envTest.SUPABASE_URL).toBe('http://localhost:54321');
+    expect(envTest.STELLAR_RPC_URL).toBe('http://localhost:8000');
+
+    const envDev = parseEnv(
+      validEnv({
+        NODE_ENV: 'development',
+        SUPABASE_URL: 'http://localhost:54321',
+        STELLAR_RPC_URL: 'http://localhost:8000',
+      }),
+    );
+    expect(envDev.SUPABASE_URL).toBe('http://localhost:54321');
+    expect(envDev.STELLAR_RPC_URL).toBe('http://localhost:8000');
+  });
 });
+

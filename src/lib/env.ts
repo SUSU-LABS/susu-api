@@ -129,6 +129,26 @@ function assertSecurityInvariants(env: Env): void {
     );
   }
 
+  if (env.NODE_ENV === 'production') {
+    try {
+      if (new URL(env.SUPABASE_URL).protocol !== 'https:') {
+        throw new Error();
+      }
+    } catch {
+      throw new Error(
+        'SUPABASE_URL must use https:// in production to protect service-role credentials.',
+      );
+    }
+
+    try {
+      if (new URL(env.STELLAR_RPC_URL).protocol !== 'https:') {
+        throw new Error();
+      }
+    } catch {
+      throw new Error('STELLAR_RPC_URL must use https:// in production.');
+    }
+  }
+
   const expectedPassphrase =
     env.STELLAR_NETWORK === 'mainnet'
       ? Networks.PUBLIC
