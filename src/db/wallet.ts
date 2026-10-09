@@ -21,8 +21,14 @@ const ADDRESS_UNIQUE = 'wallet_links_address_unique';
 
 function isUniqueViolationOn(error: unknown, constraint: string): boolean {
   if (typeof error !== 'object' || error === null) return false;
-  const candidate = error as { code?: unknown; constraint?: unknown };
-  return candidate.code === UNIQUE_VIOLATION && candidate.constraint === constraint;
+  const candidate = error as { code?: unknown; constraint?: unknown; cause?: unknown };
+  if (candidate.code === UNIQUE_VIOLATION && candidate.constraint === constraint) return true;
+  // drizzle wraps query failures in DrizzleQueryError; the Postgres error
+  // carrying `code`/`constraint` lives under `.cause`.
+  const cause = candidate.cause;
+  if (typeof cause !== 'object' || cause === null) return false;
+  const inner = cause as { code?: unknown; constraint?: unknown };
+  return inner.code === UNIQUE_VIOLATION && inner.constraint === constraint;
 }
 
 export type WalletLinkStore = {
