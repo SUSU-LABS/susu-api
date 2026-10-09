@@ -23,8 +23,8 @@ declare module 'fastify' {
   }
 }
 
-/** The scheme name, matched case-sensitively as RFC 6750 defines it. */
-const BEARER_PREFIX = 'Bearer ';
+/** The scheme name, matched case-insensitively as RFC 7235 defines it. */
+const BEARER_SCHEME = 'bearer';
 
 function unauthorized(reply: FastifyReply): void {
   // `www-authenticate` is what makes this a 401 rather than a 403 to any client
@@ -43,11 +43,21 @@ function unauthorized(reply: FastifyReply): void {
 export function createRequireAuth(verifyToken: TokenVerifier) {
   return async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const header = request.headers.authorization;
-    if (typeof header !== 'string' || !header.startsWith(BEARER_PREFIX)) {
+    if (typeof header !== 'string') {
       return unauthorized(reply);
     }
 
-    const token = header.slice(BEARER_PREFIX.length).trim();
+    const spaceIndex = header.indexOf(' ');
+    if (spaceIndex === -1) {
+      return unauthorized(reply);
+    }
+
+    const scheme = header.slice(0, spaceIndex);
+    if (scheme.toLowerCase() !== BEARER_SCHEME) {
+      return unauthorized(reply);
+    }
+
+    const token = header.slice(spaceIndex + 1).trim();
     if (token.length === 0) return unauthorized(reply);
 
     // A verifier that throws is an unauthenticated request, not an error the
