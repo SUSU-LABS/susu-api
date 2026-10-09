@@ -301,3 +301,165 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('the database pool is closed with the server', () => {
+  it('is ended by app.close(), the shutdown path everything waits for', async () => {
+    const { buildServer } = await import('../src/server');
+    const { getPool } = await import('../src/db/client');
+
+    // No store is injected, so this app is built on the real, process-wide pool
+    // that `getDb()` creates lazily — the one nothing else was closing.
+    const app = await buildServer({ probeDatabase: async () => {} });
+    const pool = getPool();
+
+    expect(pool.ended).toBe(false);
+
+    await app.close();
+
+    expect(pool.ended).toBe(true);
+  });
+
+  it('resolves only once the pool has closed', async () => {
+    const { buildServer } = await import('../src/server');
+
+    let finish: () => void = () => {};
+    const drained = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const closeDatabase = vi.fn(() => drained);
+    const app = await buildServer({ probeDatabase: async () => {}, closeDatabase });
+
+    const closed = app.close();
+    const settled = await Promise.race([
+      closed.then(() => 'closed' as const),
+      new Promise((resolve) => setTimeout(() => resolve('in-flight' as const), 50)),
+    ]);
+
+    // `index.ts` exits as soon as this promise settles, so a close that reported
+    // success while the pool was still draining would cut an in-flight query off.
+    expect(settled).toBe('in-flight');
+
+    finish();
+    await closed;
+    expect(closeDatabase).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the nonce reaper belongs to the server', () => {
+  it('runs on the interval the caller asked for, and stops when the server closes', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: { reap } as never,
+        nonceReapIntervalMs: 1_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(reap).toHaveBeenCalledTimes(1);
+
+      await app.close();
+
+      // A closed server must not keep reaping. The interval used to be started
+      // with its handle discarded, so it outlived the app — and a tick after
+      // close could lazily create a real database pool and query through it.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(reap).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not started for a caller that did not ask for it', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: { reap } as never,
+      });
+
+      // Long past the production interval: if a reaper were running at all it
+      // would have fired by now.
+      await vi.advanceTimersByTimeAsync(16 * 60 * 1000);
+      expect(reap).not.toHaveBeenCalled();
+
+      await app.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('the notification sweep runs without pg_cron', () => {
+  it('schedules the sweeper on the interval, and stops when the server closes', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => ({ events: 0, written: 0, rounds: 0 }));
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        notificationSweepIntervalMs: 1_000,
+        notificationSweeper: { sweep },
+      });
+
+      // `pg_cron` is not present here either — the schedule is the app's, and it
+      // is what a database without the extension would get.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+
+      await app.close();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('derives through the same SQL function, rather than restating the query', async () => {
+    const { startNotificationSweep } = await import('../src/server');
+    const { createNotificationSweeper } = await import('../src/db/notification-sweep');
+
+    const execute = vi.fn(async () => ({ rows: [{ events: 0, written: 0, rounds: 0 }] }));
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const sweeper = createNotificationSweeper({ execute } as never);
+
+    vi.useFakeTimers();
+    const timer = startNotificationSweep(sweeper, log as never, 1_000);
+    try {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(log.warn).not.toHaveBeenCalled();
+    } finally {
+      clearInterval(timer);
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not started for a caller that did not ask for it', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => ({ events: 0, written: 0, rounds: 0 }));
+      const app = await buildServer({
+        probeDatabase: async () => {},
+        notificationSweeper: { sweep },
+      });
+
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(sweep).not.toHaveBeenCalled();
+
+      await app.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
