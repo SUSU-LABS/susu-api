@@ -257,4 +257,3 @@ describe('parseEnv', () => {
     expect(envDev.STELLAR_RPC_URL).toBe('http://localhost:8000');
   });
 });
-
