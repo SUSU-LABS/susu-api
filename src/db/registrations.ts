@@ -123,7 +123,12 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             ),
           );
 
-        const expiresAt = new Date(Date.now() + REGISTRATION_TTL_MS);
+        // Expiry is computed in SQL from the database clock (`now() + interval`)
+        // rather than the application clock. That keeps the effective window
+        // independent of host clock skew and ensures the check constraint
+        // `group_registrations_window_positive (expires_at > created_at)` can
+        // never be violated by a skewed host clock.
+        const expiresAtSql = sql`now() + (${REGISTRATION_TTL_MS} * interval '1 millisecond')`;
 
         // The cap is checked against the claim being *replaced*, so re-registering
         // an address an account already holds is never refused for being at the
@@ -141,7 +146,7 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         if (alreadyMine) {
           const updated = await tx
             .update(groupRegistrations)
-            .set({ expiresAt })
+            .set({ expiresAt: expiresAtSql })
             .where(
               and(
                 eq(groupRegistrations.contractId, contractId),
@@ -153,11 +158,13 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             )
             .returning({ expiresAt: groupRegistrations.expiresAt });
 
-          return {
-            outcome: 'registered',
-            contractId,
-            expiresAt: (updated[0]?.expiresAt ?? expiresAt).toISOString(),
-          } as const;
+          if (updated[0] !== undefined) {
+            return {
+              outcome: 'registered',
+              contractId,
+              expiresAt: updated[0].expiresAt.toISOString(),
+            } as const;
+          }
         }
 
         // Another account's claim, or none. `onConflictDoNothing` makes the insert
@@ -165,7 +172,7 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         // existing holder keeps it and this account learns it is registered.
         const inserted = await tx
           .insert(groupRegistrations)
-          .values({ contractId, registeredBy: userId, expiresAt })
+          .values({ contractId, registeredBy: userId, expiresAt: expiresAtSql })
           .onConflictDoNothing({ target: groupRegistrations.contractId })
           .returning({ expiresAt: groupRegistrations.expiresAt });
 
@@ -185,7 +192,9 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         return {
           outcome: 'registered',
           contractId,
-          expiresAt: (holder[0]?.expiresAt ?? expiresAt).toISOString(),
+          expiresAt:
+            holder[0]?.expiresAt.toISOString() ??
+            new Date(Date.now() + REGISTRATION_TTL_MS).toISOString(),
         } as const;
       });
     },

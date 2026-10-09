@@ -216,4 +216,58 @@ describe('createRegistrationStore.register', () => {
     );
     expect(rows.rows[0]?.['live']).toBe(MAX_LIVE_REGISTRATIONS);
   });
+
+  it('is unaffected by application clock skew and satisfies positive window constraint', async () => {
+    const realDateNow = Date.now;
+    try {
+      // Skew the application clock backwards by 2 hours (which with client-clock expiry
+      // would produce expires_at < created_at, violating `expires_at > created_at`)
+      Date.now = () => realDateNow() - 2 * 60 * 60 * 1000;
+
+      const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
+      expect(result.outcome).toBe('registered');
+      if (result.outcome !== 'registered') throw new Error('expected registration');
+
+      // Check database state directly
+      const rows = await testDb.query(
+        'select created_at, expires_at from public.group_registrations where contract_id = $1',
+        [GROUP_CONTRACT_ID],
+      );
+      expect(rows.rows).toHaveLength(1);
+      const createdAt = new Date(rows.rows[0]?.['created_at'] as string).getTime();
+      const expiresAt = new Date(rows.rows[0]?.['expires_at'] as string).getTime();
+
+      // Window is positive and derived from the single database clock source
+      expect(expiresAt).toBeGreaterThan(createdAt);
+      expect(expiresAt - createdAt).toBe(REGISTRATION_TTL_MS);
+
+      // And isRegistered remains true
+      expect(await store.isRegistered(GROUP_CONTRACT_ID)).toBe(true);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  it('derives expiry from database clock even when application clock is shifted into the future', async () => {
+    const realDateNow = Date.now;
+    try {
+      Date.now = () => realDateNow() + 10 * 60 * 60 * 1000;
+
+      const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
+      expect(result.outcome).toBe('registered');
+      if (result.outcome !== 'registered') throw new Error('expected registration');
+
+      const rows = await testDb.query(
+        'select created_at, expires_at from public.group_registrations where contract_id = $1',
+        [GROUP_CONTRACT_ID],
+      );
+      const createdAt = new Date(rows.rows[0]?.['created_at'] as string).getTime();
+      const expiresAt = new Date(rows.rows[0]?.['expires_at'] as string).getTime();
+
+      expect(expiresAt).toBeGreaterThan(createdAt);
+      expect(expiresAt - createdAt).toBe(REGISTRATION_TTL_MS);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
 });
