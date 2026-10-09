@@ -212,4 +212,61 @@ describe('parseEnv', () => {
     );
     expect(envConfigured.TRUSTED_PROXY_CIDRS).toBe('10.0.0.0/8,172.16.0.0/12,192.168.0.0/16');
   });
+
+  it('rejects an http:// SUPABASE_URL in production', () => {
+    expect(() =>
+      parseEnv(
+        validEnv({
+          NODE_ENV: 'production',
+          SUPABASE_URL: 'http://example.supabase.co',
+        }),
+      ),
+    ).toThrow(/SUPABASE_URL: must use https:\/\/ in production/);
+  });
+
+  it('rejects an http:// STELLAR_RPC_URL in production', () => {
+    expect(() =>
+      parseEnv(
+        validEnv({
+          NODE_ENV: 'production',
+          STELLAR_RPC_URL: 'http://soroban-testnet.stellar.org',
+        }),
+      ),
+    ).toThrow(/STELLAR_RPC_URL: must use https:\/\/ in production/);
+  });
+
+  it('allows http:// URLs for Supabase and Stellar RPC in development and test environments', () => {
+    const testEnv = parseEnv(
+      validEnv({
+        NODE_ENV: 'test',
+        SUPABASE_URL: 'http://localhost:54321',
+        STELLAR_RPC_URL: 'http://localhost:8000',
+      }),
+    );
+    expect(testEnv.SUPABASE_URL).toBe('http://localhost:54321');
+    expect(testEnv.STELLAR_RPC_URL).toBe('http://localhost:8000');
+
+    const devEnv = parseEnv(
+      validEnv({
+        NODE_ENV: 'development',
+        SUPABASE_URL: 'http://localhost:54321',
+        STELLAR_RPC_URL: 'http://localhost:8000',
+      }),
+    );
+    expect(devEnv.SUPABASE_URL).toBe('http://localhost:54321');
+    expect(devEnv.STELLAR_RPC_URL).toBe('http://localhost:8000');
+  });
+
+  it('accepts https:// URLs in production', () => {
+    const prodEnv = parseEnv(
+      validEnv({
+        NODE_ENV: 'production',
+        SUPABASE_URL: 'https://example.supabase.co',
+        STELLAR_RPC_URL: 'https://soroban-testnet.stellar.org',
+      }),
+    );
+    expect(prodEnv.NODE_ENV).toBe('production');
+    expect(prodEnv.SUPABASE_URL).toBe('https://example.supabase.co');
+    expect(prodEnv.STELLAR_RPC_URL).toBe('https://soroban-testnet.stellar.org');
+  });
 });
