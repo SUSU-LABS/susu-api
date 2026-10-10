@@ -282,14 +282,22 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   // thing deriving notifications. The sweep is idempotent (unique index on
   // (user_id, kind, source_event_identity), plus the notification_examined
   // tombstones), so racing pg_cron or another instance writes nothing twice.
-  const notificationSweeper = options.notificationSweeper ?? createNotificationSweeper(getDb());
-  const sweepIntervalMs = options.notificationSweepIntervalMs ?? env.NOTIFICATION_SWEEP_INTERVAL_MS;
-  timers.push(startNotificationSweeping(notificationSweeper, app.log, sweepIntervalMs));
+  // Injected database probes isolate route tests from database background work.
+  // A supplied sweeper explicitly opts into the worker in those tests.
+  const notificationWorker =
+    options.notificationSweeper !== undefined || options.probeDatabase === undefined
+      ? startNotificationSweeping(
+          options.notificationSweeper ?? createNotificationSweeper(getDb()),
+          app.log,
+          options.notificationSweepIntervalMs ?? env.NOTIFICATION_SWEEP_INTERVAL_MS,
+        )
+      : undefined;
 
   app.addHook('onClose', async () => {
     for (const timer of timers) {
       clearInterval(timer);
     }
+    await notificationWorker?.stop();
   });
 
   return app;
@@ -357,10 +365,16 @@ export function startNotificationSweeping(
   sweeper: Pick<NotificationSweeper, 'sweep'>,
   log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
   intervalMs: number = 60_000,
-): ReturnType<typeof setInterval> {
+): { stop(): Promise<void> } {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new RangeError('Notification sweep interval must be positive.');
+  }
+  let stopped = false;
+  let pending: Promise<void> | undefined;
   const run = () => {
-    sweeper
-      .sweep()
+    if (stopped || pending !== undefined) return;
+    pending = Promise.resolve()
+      .then(() => sweeper.sweep())
       .then((result) => {
         if (result.written > 0) {
           log.info(
@@ -371,17 +385,19 @@ export function startNotificationSweeping(
       })
       .catch((error: unknown) => {
         log.warn({ event: 'notification_sweep_failed', err: error }, 'notification sweep failed');
+      })
+      .finally(() => {
+        pending = undefined;
       });
   };
-
-  // Run once at boot so a restart catches up immediately instead of waiting for
-  // the first tick. Idempotent, so this is safe alongside pg_cron.
   run();
-
   const timer = setInterval(run, intervalMs);
-
-  // The sweep must never be the reason the process stays alive.
   timer.unref();
-
-  return timer;
+  return {
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      await pending;
+    },
+  };
 }

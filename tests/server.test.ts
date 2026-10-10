@@ -312,6 +312,7 @@ describe('startNotificationSweeping', () => {
       const log = { info: vi.fn(), warn: vi.fn() };
 
       const timer = startNotificationSweeping({ sweep }, log as never, 1_000);
+      await Promise.resolve();
       expect(sweep).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(1_000);
@@ -321,7 +322,7 @@ describe('startNotificationSweeping', () => {
         expect.any(String),
       );
 
-      clearInterval(timer);
+      await timer.stop();
     } finally {
       vi.useRealTimers();
     }
@@ -348,7 +349,7 @@ describe('startNotificationSweeping', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(sweep).toHaveBeenCalledTimes(3);
 
-      clearInterval(timer);
+      await timer.stop();
     } finally {
       vi.useRealTimers();
     }
@@ -358,6 +359,7 @@ describe('startNotificationSweeping', () => {
     const { buildServer } = await import('../src/server');
     const sweep = vi.fn(async () => ({ events: 0, written: 0, rounds: 0 }));
 
+    vi.useFakeTimers();
     const server = await buildServer({
       probeDatabase: async () => {},
       notificationSweeper: { sweep },
@@ -367,12 +369,47 @@ describe('startNotificationSweeping', () => {
     expect(sweep).toHaveBeenCalledTimes(1);
     await server.close();
 
-    vi.useFakeTimers();
     try {
       await vi.advanceTimersByTimeAsync(2_000);
       // Since server closed, timer was cleared, so no further calls occur.
+      await Promise.resolve();
       expect(sweep).toHaveBeenCalledTimes(1);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('notification sweep lifecycle', () => {
+  it('does not overlap slow work and drains it before stopping', async () => {
+    const { startNotificationSweeping } = await import('../src/server');
+    vi.useFakeTimers();
+    let resolve!: (result: { events: number; written: number; rounds: number }) => void;
+    const sweep = vi.fn(
+      () =>
+        new Promise<{ events: number; written: number; rounds: number }>((done) => {
+          resolve = done;
+        }),
+    );
+    const worker = startNotificationSweeping({ sweep }, { info: vi.fn(), warn: vi.fn() }, 100);
+    try {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+      let stopped = false;
+      const stopping = worker.stop().then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(stopped).toBe(false);
+      expect(sweep).toHaveBeenCalledTimes(1);
+      resolve({ events: 0, written: 0, rounds: 0 });
+      await stopping;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(stopped).toBe(true);
+      expect(sweep).toHaveBeenCalledTimes(1);
+    } finally {
+      resolve({ events: 0, written: 0, rounds: 0 });
+      await worker.stop();
       vi.useRealTimers();
     }
   });
