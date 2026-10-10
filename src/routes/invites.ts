@@ -126,6 +126,15 @@ export async function inviteRoutes(
   const { store, isKnownGroup, groupStatus, requireAuth } = options;
   const now = options.now ?? (() => new Date());
 
+  const verifiedUserLimiter = app.createRateLimit({
+    max: 20,
+    timeWindow: '1 minute',
+    keyGenerator: (request: FastifyRequest): string => {
+      const user = request.user;
+      return user ? `user:${user.id}` : `ip:${request.ip}`;
+    },
+  });
+
   /**
    * Claims a use of `code` for the authenticated user.
    *
@@ -193,7 +202,22 @@ export async function inviteRoutes(
     }
   }
 
-  app.post('/groups/:contractId/invites', { preHandler: requireAuth }, async (request, reply) => {
+  app.post(
+    '/groups/:contractId/invites',
+    {
+      preHandler: [
+        requireAuth,
+        async (request: FastifyRequest) => {
+          const check = await verifiedUserLimiter(request);
+          if (!check.isAllowed && check.isExceeded) {
+            const err = new Error('Rate limit exceeded, retry in 1 minute');
+            (err as Error & { statusCode: number }).statusCode = 429;
+            throw err;
+          }
+        },
+      ],
+    },
+    async (request, reply) => {
     const parsedParams = params.safeParse(request.params);
     if (!parsedParams.success) return invalidRequest(reply, parsedParams.error);
 
