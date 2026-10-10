@@ -49,6 +49,7 @@ export const envSchema = z.object({
   STELLAR_NETWORK: z.enum(['local', 'testnet', 'mainnet']),
   STELLAR_RPC_URL: z.string().url(),
   STELLAR_NETWORK_PASSPHRASE: z.string().min(1),
+  SIMULATION_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
   FACTORY_CONTRACT_ID: contractIdSchema,
   USDC_CONTRACT_ID: contractIdSchema,
   TREASURY_ADDRESS: accountIdSchema,
