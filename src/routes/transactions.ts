@@ -179,33 +179,29 @@ export async function transactionRoutes(
         outcome = await prepareInvocation({
           envelopeXdr: parsed.data.transactionXdr,
           networkPassphrase,
-          simulate: (tx) => {
-            return new Promise((resolve, reject) => {
-              const timer = setTimeout(() => {
-                const err = new Error('simulation_timeout');
-                reject(err);
-              }, simulationTimeoutMs);
-              (timer as unknown as { unref?: () => void }).unref?.();
-
-              simulate(tx)
-                .then((res) => {
-                  clearTimeout(timer);
-                  resolve(res);
-                })
-                .catch((err) => {
-                  clearTimeout(timer);
-                  reject(err);
-                });
-            });
-          },
+          simulate: (tx) =>
+            new Promise((resolve, reject) => {
+              const timer = setTimeout(
+                () => reject(new SimulationTimeoutError()),
+                simulationTimeoutMs,
+              );
+              timer.unref();
+              Promise.resolve()
+                .then(() => simulate(tx))
+                .then(resolve, () => reject(new SimulationTransportError()))
+                .finally(() => clearTimeout(timer));
+            }),
           isAllowedContract,
         });
       } catch (err: unknown) {
-        if (err instanceof Error && err.message === 'simulation_timeout') {
+        if (err instanceof SimulationTimeoutError) {
           return reply.code(503).send({ error: 'simulation_timeout' });
         }
-        request.log.error({ err }, 'simulation upstream failure');
-        return reply.code(502).send({ error: 'simulation_failed' });
+        if (err instanceof SimulationTransportError) {
+          request.log.warn({ event: 'simulation_failed' }, 'simulation upstream failure');
+          return reply.code(502).send({ error: 'simulation_failed' });
+        }
+        throw err;
       }
 
       reply.header('cache-control', 'no-store');
@@ -221,3 +217,6 @@ export async function transactionRoutes(
     },
   );
 }
+
+class SimulationTimeoutError extends Error {}
+class SimulationTransportError extends Error {}

@@ -48,10 +48,8 @@ export function createSorobanSimulator(
 
   return async (transaction) => {
     if (!server) {
-      server = new rpc.Server(url, { allowHttp: url.startsWith('http://'), timeout: timeoutMs });
-      if (server.httpClient?.defaults) {
-        server.httpClient.defaults.timeout = timeoutMs;
-      }
+      server = new rpc.Server(url, { allowHttp: url.startsWith('http://') });
+      server.httpClient.defaults.timeout = timeoutMs;
     }
     return await server.simulateTransaction(transaction);
   };
