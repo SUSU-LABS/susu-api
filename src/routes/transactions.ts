@@ -32,6 +32,7 @@ export type TransactionRoutesOptions = {
   simulate: SorobanSimulator;
   isAllowedContract: (contractId: string) => Promise<boolean>;
   networkPassphrase: string;
+  simulationTimeoutMs?: number;
 };
 
 /**
@@ -87,7 +88,14 @@ export async function transactionRoutes(
   app: FastifyInstance,
   options: TransactionRoutesOptions,
 ): Promise<void> {
-  const { readModel, requireAuth, simulate, isAllowedContract, networkPassphrase } = options;
+  const {
+    readModel,
+    requireAuth,
+    simulate,
+    isAllowedContract,
+    networkPassphrase,
+    simulationTimeoutMs = 10_000,
+  } = options;
 
   const verifiedUserLimiter = app.createRateLimit({
     max: 20,
@@ -166,12 +174,38 @@ export async function transactionRoutes(
       // decide whether that account may make the call — the contract does that.
       authenticatedUser(request);
 
-      const outcome: PrepareOutcome = await prepareInvocation({
-        envelopeXdr: parsed.data.transactionXdr,
-        networkPassphrase,
-        simulate,
-        isAllowedContract,
-      });
+      let outcome: PrepareOutcome;
+      try {
+        outcome = await prepareInvocation({
+          envelopeXdr: parsed.data.transactionXdr,
+          networkPassphrase,
+          simulate: (tx) => {
+            return new Promise((resolve, reject) => {
+              const timer = setTimeout(() => {
+                const err = new Error('simulation_timeout');
+                reject(err);
+              }, simulationTimeoutMs);
+
+              simulate(tx)
+                .then((res) => {
+                  clearTimeout(timer);
+                  resolve(res);
+                })
+                .catch((err) => {
+                  clearTimeout(timer);
+                  reject(err);
+                });
+            });
+          },
+          isAllowedContract,
+        });
+      } catch (err: unknown) {
+        if (err instanceof Error && err.message === 'simulation_timeout') {
+          return reply.code(503).send({ error: 'simulation_timeout' });
+        }
+        request.log.error({ err }, 'simulation upstream failure');
+        return reply.code(502).send({ error: 'simulation_failed' });
+      }
 
       reply.header('cache-control', 'no-store');
 
