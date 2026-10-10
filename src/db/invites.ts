@@ -103,6 +103,7 @@ export type InviteStore = {
   redeem(input: {
     code: string;
     userId: string;
+    expectedGroupContractId?: string;
     shouldClaim?: (groupContractId: string) => Promise<boolean>;
   }): Promise<RedeemOutcome>;
 };
@@ -138,7 +139,7 @@ export function createInviteStore(db: Database): InviteStore {
       return toRecord(row);
     },
 
-    async redeem({ code, userId, shouldClaim }) {
+    async redeem({ code, userId, expectedGroupContractId, shouldClaim }) {
       // The claim decision needs I/O (a group-status read on the shared pool),
       // so it is resolved here, before the transaction opens. Awaiting it while
       // holding the invite row lock would hold the lock across a network round
@@ -149,7 +150,7 @@ export function createInviteStore(db: Database): InviteStore {
       // The lookups below are courtesy only: the transaction re-checks
       // everything under the lock and stays the authority. They exist so
       // `shouldClaim` is not asked when the answer is already known — no such
-      // code, or a redemption this user already made.
+      // code, wrong group, or a redemption this user already made.
       const [preview] = await db
         .select()
         .from(inviteLinks)
@@ -160,6 +161,12 @@ export function createInviteStore(db: Database): InviteStore {
       if (preview.revokedAt !== null) return { outcome: 'revoked' } as const;
       if (preview.expiresAt !== null && preview.expiresAt.getTime() <= Date.now()) {
         return { outcome: 'expired' } as const;
+      }
+      if (
+        expectedGroupContractId !== undefined &&
+        preview.groupContractId !== expectedGroupContractId
+      ) {
+        return { outcome: 'not_found' } as const;
       }
 
       const [already] = await db
@@ -197,6 +204,12 @@ export function createInviteStore(db: Database): InviteStore {
         if (invite.revokedAt !== null) return { outcome: 'revoked' } as const;
         if (invite.expiresAt !== null && invite.expiresAt.getTime() <= Date.now()) {
           return { outcome: 'expired' } as const;
+        }
+        if (
+          expectedGroupContractId !== undefined &&
+          invite.groupContractId !== expectedGroupContractId
+        ) {
+          return { outcome: 'not_found' } as const;
         }
 
         // The code identifies the group, which is the point of it: an invite link
