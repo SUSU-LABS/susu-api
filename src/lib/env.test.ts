@@ -256,4 +256,12 @@ describe('parseEnv', () => {
     expect(envDev.SUPABASE_URL).toBe('http://localhost:54321');
     expect(envDev.STELLAR_RPC_URL).toBe('http://localhost:8000');
   });
+
+  it('defaults SIMULATION_TIMEOUT_MS to 10000 and parses custom values', () => {
+    const defaultEnv = parseEnv(validEnv());
+    expect(defaultEnv.SIMULATION_TIMEOUT_MS).toBe(10000);
+
+    const customEnv = parseEnv(validEnv({ SIMULATION_TIMEOUT_MS: '15000' }));
+    expect(customEnv.SIMULATION_TIMEOUT_MS).toBe(15000);
+  });
 });

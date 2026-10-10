@@ -32,6 +32,7 @@ export type TransactionRoutesOptions = {
   simulate: SorobanSimulator;
   isAllowedContract: (contractId: string) => Promise<boolean>;
   networkPassphrase: string;
+  simulationTimeoutMs?: number;
 };
 
 /**
@@ -87,7 +88,14 @@ export async function transactionRoutes(
   app: FastifyInstance,
   options: TransactionRoutesOptions,
 ): Promise<void> {
-  const { readModel, requireAuth, simulate, isAllowedContract, networkPassphrase } = options;
+  const {
+    readModel,
+    requireAuth,
+    simulate,
+    isAllowedContract,
+    networkPassphrase,
+    simulationTimeoutMs = 10_000,
+  } = options;
 
   const verifiedUserLimiter = app.createRateLimit({
     max: 20,
@@ -166,12 +174,35 @@ export async function transactionRoutes(
       // decide whether that account may make the call — the contract does that.
       authenticatedUser(request);
 
-      const outcome: PrepareOutcome = await prepareInvocation({
-        envelopeXdr: parsed.data.transactionXdr,
-        networkPassphrase,
-        simulate,
-        isAllowedContract,
-      });
+      let outcome: PrepareOutcome;
+      try {
+        outcome = await prepareInvocation({
+          envelopeXdr: parsed.data.transactionXdr,
+          networkPassphrase,
+          simulate: (tx) =>
+            new Promise((resolve, reject) => {
+              const timer = setTimeout(
+                () => reject(new SimulationTimeoutError()),
+                simulationTimeoutMs,
+              );
+              timer.unref();
+              Promise.resolve()
+                .then(() => simulate(tx))
+                .then(resolve, () => reject(new SimulationTransportError()))
+                .finally(() => clearTimeout(timer));
+            }),
+          isAllowedContract,
+        });
+      } catch (err: unknown) {
+        if (err instanceof SimulationTimeoutError) {
+          return reply.code(503).send({ error: 'simulation_timeout' });
+        }
+        if (err instanceof SimulationTransportError) {
+          request.log.warn({ event: 'simulation_failed' }, 'simulation upstream failure');
+          return reply.code(502).send({ error: 'simulation_failed' });
+        }
+        throw err;
+      }
 
       reply.header('cache-control', 'no-store');
 
@@ -186,3 +217,6 @@ export async function transactionRoutes(
     },
   );
 }
+
+class SimulationTimeoutError extends Error {}
+class SimulationTransportError extends Error {}

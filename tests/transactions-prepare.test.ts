@@ -94,6 +94,7 @@ type HarnessOptions = {
   /** Whether a just-created address was registered before the index caught up. */
   registered?: boolean;
   verify?: TokenVerifier;
+  simulationTimeoutMs?: number;
 };
 
 async function harness(options: HarnessOptions = {}): Promise<{
@@ -114,6 +115,7 @@ async function harness(options: HarnessOptions = {}): Promise<{
     probeDatabase: async () => {},
     verifyToken: verify as unknown as TokenVerifier,
     sorobanSimulator: simulate as never,
+    simulationTimeoutMs: options.simulationTimeoutMs,
     readModel: {
       groupExists,
       listGroups: vi.fn(),
@@ -445,5 +447,44 @@ describe('POST /api/v1/transactions/prepare', () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toEqual({ error: 'not_a_single_invocation' });
     expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 when simulation exceeds configured timeout with a hanging simulator', async () => {
+    const neverResolvingSimulate = () => new Promise<never>(() => {});
+    const { app } = await harness({
+      knownGroup: GROUP,
+      simulate: neverResolvingSimulate,
+      simulationTimeoutMs: 50,
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/transactions/prepare',
+      headers: AUTH,
+      payload: { transactionXdr: envelopeXdr(GROUP, 'contribute') },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ error: 'simulation_timeout' });
+  });
+
+  it('maps an upstream RPC transport error to 502 rather than an unhandled 500', async () => {
+    const rejectingSimulate = async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:8000');
+    };
+    const { app } = await harness({
+      knownGroup: GROUP,
+      simulate: rejectingSimulate,
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/transactions/prepare',
+      headers: AUTH,
+      payload: { transactionXdr: envelopeXdr(GROUP, 'contribute') },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: 'simulation_failed' });
   });
 });
