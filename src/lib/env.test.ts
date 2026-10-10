@@ -256,4 +256,12 @@ describe('parseEnv', () => {
     expect(envDev.SUPABASE_URL).toBe('http://localhost:54321');
     expect(envDev.STELLAR_RPC_URL).toBe('http://localhost:8000');
   });
+
+  it('defaults NOTIFICATION_SWEEP_INTERVAL_MS to 60000 and parses custom values', () => {
+    const defaultEnv = parseEnv(validEnv());
+    expect(defaultEnv.NOTIFICATION_SWEEP_INTERVAL_MS).toBe(60000);
+
+    const customEnv = parseEnv(validEnv({ NOTIFICATION_SWEEP_INTERVAL_MS: '120000' }));
+    expect(customEnv.NOTIFICATION_SWEEP_INTERVAL_MS).toBe(120000);
+  });
 });
