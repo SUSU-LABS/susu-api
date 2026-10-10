@@ -90,6 +90,13 @@ export type PrepareOutcome =
   | { readonly status: 'restore_required'; readonly contractId: string; readonly method: string }
   /** A simulation response this service does not recognise. Never treated as success. */
   | { readonly status: 'unrecognized'; readonly contractId: string; readonly method: string }
+  /**
+   * The simulation never answered, or the transport failed before an answer
+   * could arrive. Distinct from `refused`: the contract said nothing, so the
+   * client must not read this as a verdict on its call. The route maps it to
+   * 503, a retryable upstream failure, rather than the generic 500.
+   */
+  | { readonly status: 'unavailable'; readonly contractId: string; readonly method: string }
   /** Refused before simulation. */
   | { readonly status: 'invalid'; readonly reason: PrepareRefusal };
 
@@ -152,6 +159,12 @@ export type PrepareOptions = {
   readonly networkPassphrase: string;
   readonly simulate: (transaction: Transaction) => Promise<rpc.Api.SimulateTransactionResponse>;
   /**
+   * How long a simulation may take before it is treated as an upstream
+   * failure. A hung RPC must not hold the HTTP request — and its rate-limit
+   * budget — open indefinitely.
+   */
+  readonly simulationTimeoutMs: number;
+  /**
    * Whether this contract may be simulated here.
    *
    * Injected rather than imported because the answer combines the Factory address
@@ -161,8 +174,28 @@ export type PrepareOptions = {
   readonly isAllowedContract: (contractId: string) => Promise<boolean>;
 };
 
+/** Rejects if `promise` does not settle within `ms`. The timer is unref'd so a hung promise cannot hold the process open on its own. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`simulation timed out after ${ms}ms`)), ms);
+    // `unref` exists in Node and is absent in edge runtimes; guarded so this
+    // helper stays portable.
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  // The loser keeps running in the background: stellar-sdk's simulateTransaction
+  // takes no AbortSignal, so there is nothing to cancel it with. The race only
+  // decides which settlement the caller sees. A hung RPC therefore still holds
+  // its socket until it settles, but it no longer holds the HTTP request or the
+  // rate-limit budget.
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 export async function prepareInvocation(options: PrepareOptions): Promise<PrepareOutcome> {
-  const { envelopeXdr, networkPassphrase, simulate, isAllowedContract } = options;
+  const { envelopeXdr, networkPassphrase, simulate, simulationTimeoutMs, isAllowedContract } =
+    options;
 
   const parsed = parseInvocationEnvelope(envelopeXdr, networkPassphrase);
   if (typeof parsed === 'string') return { status: 'invalid', reason: parsed };
@@ -173,7 +206,19 @@ export async function prepareInvocation(options: PrepareOptions): Promise<Prepar
     return { status: 'invalid', reason: 'contract_not_allowed' };
   }
 
-  const simulation = await simulate(transaction);
+  // Transport failures and timeouts are upstream failures, not contract
+  // verdicts. They must not reach the `isSimulationError` branch below, which
+  // reports the contract's own refusal — a hung RPC saying nothing is not the
+  // contract saying no. Any throw from `simulate` means no simulation response
+  // arrived, so `unavailable` is the only honest classification; a logic error
+  // inside the simulator is indistinguishable from a transport failure here,
+  // and both are transient from the client's perspective.
+  let simulation: rpc.Api.SimulateTransactionResponse;
+  try {
+    simulation = await withTimeout(simulate(transaction), simulationTimeoutMs);
+  } catch {
+    return { status: 'unavailable', contractId, method };
+  }
 
   if (rpc.Api.isSimulationError(simulation)) {
     return { status: 'refused', contractId, method, rawError: String(simulation.error) };
