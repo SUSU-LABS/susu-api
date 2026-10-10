@@ -24,9 +24,14 @@ const BOB = `G${'B'.repeat(55)}`;
 const TREASURY = `G${'T'.repeat(55)}`;
 
 let test: TestDb;
+const queries: { query: string; params: unknown[] }[] = [];
 
 beforeAll(async () => {
-  test = await createTestDb();
+  test = await createTestDb({
+    logQuery(query, params) {
+      queries.push({ query, params });
+    },
+  });
   // Tables owned by susu-indexer, copied minimally: only the columns
   // `getGroup` reads. The real DDL lives in the indexer's
   // `20260816000000_chain_derived.sql`.
@@ -179,47 +184,15 @@ describe('getGroup rounds via single aggregation', () => {
     expect(round.fee).toBe('4000000');
   });
 
-  it('EXPLAIN shows no per-round correlated subplan', async () => {
-    const rows = await test.query(
-      `explain (format json)
-        with rounds as (
-          select round from public.contributions where contract_id = $1
-          union
-          select round from public.payouts where contract_id = $1
-        ),
-        contrib_agg as (
-          select round, count(*)::int as contribution_count,
-                 coalesce(sum(amount), 0)::text as contributed
-          from public.contributions
-          where contract_id = $1
-          group by round
-        ),
-        latest_payout as (
-          select distinct on (round) round,
-                 recipient_amount::text as payout, recipient
-          from public.payouts
-          where contract_id = $1
-          order by round, ledger desc, event_identity desc
-        ),
-        latest_fee as (
-          select distinct on (round) round, fee::text as fee
-          from public.protocol_fees
-          where contract_id = $1
-          order by round, ledger desc, event_identity desc
-        )
-        select r.round,
-               coalesce(ca.contribution_count, 0) as contribution_count,
-               coalesce(ca.contributed, '0') as contributed,
-               lp.payout, lp.recipient, lf.fee
-        from rounds r
-        left join contrib_agg ca on ca.round = r.round
-        left join latest_payout lp on lp.round = r.round
-        left join latest_fee lf on lf.round = r.round
-        order by r.round`,
-      [GROUP],
-    );
+  it('EXPLAIN of the executed production query has no per-round correlated subplan', async () => {
+    await seedContribution(1, '100000000', 110);
+    await seedPayout(1, ALICE, '90000000', 115);
+    queries.length = 0;
+    await createGroupReadModel(test.db).getGroup(GROUP);
+    const rounds = queries.find(({ query }) => /with\s+rounds\s+as/i.test(query));
+    if (!rounds) throw new Error('getGroup did not execute its round query');
+    const rows = await test.query(`explain (format json) ${rounds.query}`, rounds.params);
     const plan = JSON.stringify(rows);
-    // A correlated subquery per round would appear as a SubPlan node.
     expect(plan).not.toContain('SubPlan');
   });
 });
