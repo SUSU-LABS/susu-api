@@ -32,6 +32,7 @@ export type TransactionRoutesOptions = {
   simulate: SorobanSimulator;
   isAllowedContract: (contractId: string) => Promise<boolean>;
   networkPassphrase: string;
+  simulationTimeoutMs: number;
 };
 
 /**
@@ -87,7 +88,14 @@ export async function transactionRoutes(
   app: FastifyInstance,
   options: TransactionRoutesOptions,
 ): Promise<void> {
-  const { readModel, requireAuth, simulate, isAllowedContract, networkPassphrase } = options;
+  const {
+    readModel,
+    requireAuth,
+    simulate,
+    isAllowedContract,
+    networkPassphrase,
+    simulationTimeoutMs,
+  } = options;
 
   const verifiedUserLimiter = app.createRateLimit({
     max: 20,
@@ -170,6 +178,7 @@ export async function transactionRoutes(
         envelopeXdr: parsed.data.transactionXdr,
         networkPassphrase,
         simulate,
+        simulationTimeoutMs,
         isAllowedContract,
       });
 

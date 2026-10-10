@@ -180,6 +180,7 @@ describe('prepareInvocation', () => {
       envelopeXdr: buildEnvelope({ method: 'contribute' }),
       networkPassphrase: PASSPHRASE,
       simulate,
+      simulationTimeoutMs: 5000,
       isAllowedContract: ALLOWED,
     });
 
@@ -207,6 +208,7 @@ describe('prepareInvocation', () => {
       envelopeXdr: buildEnvelope({}),
       networkPassphrase: PASSPHRASE,
       simulate,
+      simulationTimeoutMs: 5000,
       isAllowedContract: ALLOWED,
     });
 
@@ -223,6 +225,7 @@ describe('prepareInvocation', () => {
       envelopeXdr: buildEnvelope({ contractId: OTHER_GROUP }),
       networkPassphrase: PASSPHRASE,
       simulate,
+      simulationTimeoutMs: 5000,
       isAllowedContract: DENIED,
     });
 
@@ -246,6 +249,7 @@ describe('prepareInvocation', () => {
       envelopeXdr: buildEnvelope({}),
       networkPassphrase: PASSPHRASE,
       simulate,
+      simulationTimeoutMs: 5000,
       isAllowedContract: ALLOWED,
     });
 
@@ -275,6 +279,7 @@ describe('prepareInvocation', () => {
       envelopeXdr: buildEnvelope({}),
       networkPassphrase: PASSPHRASE,
       simulate,
+      simulationTimeoutMs: 5000,
       isAllowedContract: ALLOWED,
     });
 
@@ -297,6 +302,7 @@ describe('prepareInvocation', () => {
       }),
       networkPassphrase: PASSPHRASE,
       simulate,
+      simulationTimeoutMs: 5000,
       isAllowedContract: ALLOWED,
     });
 
@@ -315,10 +321,68 @@ describe('prepareInvocation', () => {
       envelopeXdr: buildEnvelope({}),
       networkPassphrase: PASSPHRASE,
       simulate,
+      simulationTimeoutMs: 5000,
       isAllowedContract: ALLOWED,
     });
 
     expect(outcome).toEqual({ status: 'unrecognized', contractId: GROUP, method: 'contribute' });
+  });
+
+  it('reports a simulation that never resolves as unavailable, within the timeout', async () => {
+    // A hung RPC must not hold the request open. The simulator never settles;
+    // the timeout wins and the outcome is an upstream failure, not a hang.
+    const simulate = vi.fn(() => new Promise<rpc.Api.SimulateTransactionResponse>(() => {}));
+    const start = Date.now();
+
+    const outcome = await prepareInvocation({
+      envelopeXdr: buildEnvelope({}),
+      networkPassphrase: PASSPHRASE,
+      simulate,
+      simulationTimeoutMs: 50,
+      isAllowedContract: ALLOWED,
+    });
+
+    expect(Date.now() - start).toBeLessThan(5000);
+    expect(outcome).toEqual({ status: 'unavailable', contractId: GROUP, method: 'contribute' });
+  });
+
+  it('reports a transport failure as unavailable rather than throwing', async () => {
+    const simulate = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+
+    const outcome = await prepareInvocation({
+      envelopeXdr: buildEnvelope({}),
+      networkPassphrase: PASSPHRASE,
+      simulate,
+      simulationTimeoutMs: 5000,
+      isAllowedContract: ALLOWED,
+    });
+
+    expect(outcome).toEqual({ status: 'unavailable', contractId: GROUP, method: 'contribute' });
+  });
+
+  it('still reports a contract simulation error as refused, not unavailable', async () => {
+    // The timeout wraps the transport only. A contract that answers with an
+    // error is a verdict on the call, and must stay `refused`.
+    const simulate = vi.fn(
+      async () =>
+        ({
+          latestLedger: 1,
+          id: 1,
+          error: 'not authorized',
+        }) as unknown as rpc.Api.SimulateTransactionResponse,
+    );
+
+    const outcome = await prepareInvocation({
+      envelopeXdr: buildEnvelope({}),
+      networkPassphrase: PASSPHRASE,
+      simulate,
+      simulationTimeoutMs: 5000,
+      isAllowedContract: ALLOWED,
+    });
+
+    expect(outcome.status).toBe('refused');
   });
 });
 

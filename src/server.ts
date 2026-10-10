@@ -241,6 +241,7 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     readModel: options.transactionReadModel ?? createTransactionReadModel(getDb()),
     simulate: options.sorobanSimulator ?? createSorobanSimulator(env.STELLAR_RPC_URL),
     networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
+    simulationTimeoutMs: env.SIMULATION_TIMEOUT_MS,
     // The Factory, or a group the index has actually seen. Registrations are
     // deliberately not honoured here: they are unverified claims, and letting
     // them through would turn prepare into an open simulation proxy for anyone
