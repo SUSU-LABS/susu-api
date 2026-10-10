@@ -18,7 +18,7 @@ import { createNotificationReadModel, type NotificationReadModel } from './db/no
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
-import { getDb } from './db/client';
+import { closeDb, getDb } from './db/client';
 import { createRequireAuth } from './auth/guard';
 import { createTokenVerifier, type TokenVerifier } from './auth/verify';
 import {
@@ -270,6 +270,18 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   if (options.walletLinkStore === undefined) {
     startNonceReaping(walletLinkStore, app.log);
   }
+
+  // The connection pool is a process-global singleton (see `db/client.ts`).
+  // `app.close()` alone only stops the HTTP server, leaving idle connections
+  // and in-flight queries behind. Fastify awaits onClose hooks, so
+  // registering the drain here guarantees the pool is fully ended — in-flight
+  // queries given a chance to finish — before `close()` returns, whether the
+  // caller is the process shutdown path in `index.ts` or a test.
+  // `addHook` only registers the hook; with a literal, valid hook name it does
+  // not throw in practice, so no try/catch is needed here. (ci-trigger)
+  app.addHook('onClose', async () => {
+    await closeDb();
+  });
 
   return app;
 }
