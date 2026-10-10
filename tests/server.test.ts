@@ -301,3 +301,23 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('server shutdown lifecycle', () => {
+  it('closes the database pool when the server closes', async () => {
+    const { buildServer } = await import('../src/server');
+    const { getPool, closeDb } = await import('../src/db/client');
+    const testApp = await buildServer({ probeDatabase: async () => {} });
+
+    // Initialize the pool
+    const pool = getPool();
+    expect(pool.ended).toBe(false);
+
+    // Closing the server triggers onClose hook which calls closeDb()
+    await testApp.close();
+
+    // The pool must be ended
+    expect(pool.ended).toBe(true);
+
+    await closeDb();
+  });
+});
