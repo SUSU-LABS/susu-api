@@ -117,7 +117,9 @@ describe('money is cast in SQL, not converted afterwards', () => {
     // SQL is collapsed first so the assertion does not depend on how the
     // formatter wrapped the query.
     const roundsSql = rendered(execute.mock.calls[2]?.[0]).replace(/\s+/g, ' ');
-    expect(roundsSql).toContain('coalesce(sum(c.amount), 0)::text');
+    // The aggregate CTE selects straight from public.contributions, so there
+    // is no `c.` table alias anymore; the numeric->text cast is what matters.
+    expect(roundsSql).toContain('coalesce(sum(amount), 0)::text');
   });
 
   it('refuses an amount that arrived as a number instead of failing silently', async () => {
