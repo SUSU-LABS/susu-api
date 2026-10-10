@@ -37,12 +37,41 @@
  * for the case where the code and the group came from different places.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { authenticatedUser } from '../auth/guard';
 import { generateInviteCode, isWellFormedInviteCode } from '../lib/invite-code';
 import type { InviteStore } from '../db/invites';
 import type { GroupStatus } from '../db/groups';
 import { invalidRequest } from './errors';
+
+/**
+ * Per-account rate limit for invite creation.
+ *
+ * Creating an invite writes a row to `invite_links`. Without a per-account
+ * budget, any authenticated caller can mint codes without bound, sharing only
+ * the global 100/min IP budget. Twenty creations a minute is generous for a
+ * human inviting people to a group, and tight enough to make bulk minting
+ * expensive.
+ *
+ * Keyed on a hash of the bearer token rather than `request.user.id` because
+ * the rate-limit hook runs before the auth preHandler. A token identifies the
+ * session, and a session belongs to one account.
+ */
+const CREATE_INVITE_RATE_LIMIT = {
+  max: 20,
+  timeWindow: '1 minute',
+  keyGenerator: (request: FastifyRequest): string => {
+    const header = request.headers.authorization;
+    if (typeof header === 'string' && header.startsWith('Bearer ')) {
+      const digest = createHash('sha256').update(header.slice('Bearer '.length)).digest('hex');
+      return `invite-creator:${digest.slice(0, 32)}`;
+    }
+    // Unreachable while the route requires authentication, and kept so that the
+    // limiter still has a key if the guard is ever moved or made optional.
+    return `invite-creator:ip:${request.ip}`;
+  },
+} as const;
 
 /** A Soroban contract address. Matches the group routes' pattern. */
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
@@ -193,45 +222,54 @@ export async function inviteRoutes(
     }
   }
 
-  app.post('/groups/:contractId/invites', { preHandler: requireAuth }, async (request, reply) => {
-    const parsedParams = params.safeParse(request.params);
-    if (!parsedParams.success) return invalidRequest(reply, parsedParams.error);
+  app.post(
+    '/groups/:contractId/invites',
+    {
+      preHandler: requireAuth,
+      // Replaces the global budget for this route rather than adding to it:
+      // invite creation is per-account, not per-IP.
+      config: { rateLimit: CREATE_INVITE_RATE_LIMIT },
+    },
+    async (request, reply) => {
+      const parsedParams = params.safeParse(request.params);
+      if (!parsedParams.success) return invalidRequest(reply, parsedParams.error);
 
-    const parsedBody = createBody.safeParse(request.body ?? {});
-    if (!parsedBody.success) return invalidRequest(reply, parsedBody.error);
+      const parsedBody = createBody.safeParse(request.body ?? {});
+      if (!parsedBody.success) return invalidRequest(reply, parsedBody.error);
 
-    const { contractId } = parsedParams.data;
-    // Recognised means the index knows it, or the creator registered it after a
-    // confirmation the indexer has not reached yet. Both answer the only question
-    // this gate is asking: is this an address a code may name.
-    if (!(await isKnownGroup(contractId))) return groupNotFound(reply);
+      const { contractId } = parsedParams.data;
+      // Recognised means the index knows it, or the creator registered it after a
+      // confirmation the indexer has not reached yet. Both answer the only question
+      // this gate is asking: is this an address a code may name.
+      if (!(await isKnownGroup(contractId))) return groupNotFound(reply);
 
-    const user = authenticatedUser(request);
-    const ttlHours = parsedBody.data.expiresInHours ?? DEFAULT_INVITE_TTL_HOURS;
-    const expiresAt = new Date(now().getTime() + ttlHours * 60 * 60 * 1000);
+      const user = authenticatedUser(request);
+      const ttlHours = parsedBody.data.expiresInHours ?? DEFAULT_INVITE_TTL_HOURS;
+      const expiresAt = new Date(now().getTime() + ttlHours * 60 * 60 * 1000);
 
-    const invite = await store.create({
-      code: generateInviteCode(),
-      groupContractId: contractId,
-      createdBy: user.id,
-      expiresAt,
-      maxUses: parsedBody.data.maxUses ?? null,
-    });
+      const invite = await store.create({
+        code: generateInviteCode(),
+        groupContractId: contractId,
+        createdBy: user.id,
+        expiresAt,
+        maxUses: parsedBody.data.maxUses ?? null,
+      });
 
-    // The code is returned once, here, and cannot be read back afterwards: the
-    // table has no policy granting a browser role anything, including to its
-    // creator. That is what stops an invite from being enumerated after the fact.
-    reply.header('cache-control', 'no-store');
-    return reply.code(201).send({
-      data: {
-        code: invite.code,
-        groupContractId: invite.groupContractId,
-        expiresAt: invite.expiresAt,
-        maxUses: invite.maxUses,
-        uses: invite.uses,
-      },
-    });
-  });
+      // The code is returned once, here, and cannot be read back afterwards: the
+      // table has no policy granting a browser role anything, including to its
+      // creator. That is what stops an invite from being enumerated after the fact.
+      reply.header('cache-control', 'no-store');
+      return reply.code(201).send({
+        data: {
+          code: invite.code,
+          groupContractId: invite.groupContractId,
+          expiresAt: invite.expiresAt,
+          maxUses: invite.maxUses,
+          uses: invite.uses,
+        },
+      });
+    },
+  );
 
   /**
    * Redemption for a caller holding only the code.
