@@ -301,3 +301,79 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('startNotificationSweeper', () => {
+  it('triggers notification sweep on the configured interval', async () => {
+    const { startNotificationSweeper } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => ({ events: 5, written: 2, rounds: 1 }));
+      const log = { info: vi.fn(), warn: vi.fn() };
+
+      const timer = startNotificationSweeper({ sweep }, log as never, 1_000);
+      expect(sweep).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(sweep).toHaveBeenCalledTimes(1);
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'notification_sweep', events: 5, written: 2, rounds: 1 }),
+        expect.any(String),
+      );
+
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('survives and logs a failed sweep without crashing', async () => {
+    const { startNotificationSweeper } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => {
+        throw new Error('database connection lost');
+      });
+      const log = { info: vi.fn(), warn: vi.fn() };
+
+      const timer = startNotificationSweeper({ sweep }, log as never, 1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'notification_sweep_failed' }),
+        expect.any(String),
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears background intervals on server close', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      // Build server with default timer starters
+      const appWithTimers = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: undefined, // starts reaping
+        notificationSweeper: undefined, // starts sweeping
+      });
+
+      // Closing the app cleans up all timers
+      await appWithTimers.close();
+
+      // Advancing timer after close completes cleanly without pending unhandled rejections
+      await vi.advanceTimersByTimeAsync(120_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
