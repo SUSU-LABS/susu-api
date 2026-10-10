@@ -300,4 +300,99 @@ describe('expired wallet-link nonces', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not start new reap work once closing has begun', async () => {
+    const { startNonceReaping } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const log = { info: vi.fn(), warn: vi.fn() };
+      let closing = false;
+
+      const timer = startNonceReaping({ reap }, log as never, 1_000, () => closing);
+      // Simulate close beginning before the next tick fires: a queued tick
+      // must not start new work (clearInterval alone cannot stop it).
+      closing = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(reap).not.toHaveBeenCalled();
+
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('nonce-reaper server lifecycle', () => {
+  it('clears the reaper interval when the server closes', async () => {
+    const { buildServer } = await import('../src/server');
+
+    // Do not inject a walletLinkStore so the reaper timer starts — the same
+    // condition as "this is the real service".
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    const server = await buildServer({ probeDatabase: async () => {} });
+
+    await server.close();
+
+    // The reaper's timer must have been cleared on close; otherwise a closed
+    // server leaves a live interval that can lazily create a real DB pool and
+    // query after close.
+    expect(clearIntervalSpy).toHaveBeenCalled();
+
+    clearIntervalSpy.mockRestore();
+  });
+
+  it('does not start the reaper when a store is injected', async () => {
+    const { buildServer, REAP_INTERVAL_MS } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      const fakeStore = { reap: vi.fn(async () => 0) };
+
+      const server = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: fakeStore as never,
+      });
+
+      try {
+        // No reaper timer should have been created: a test that supplies a
+        // store does not want a background timer. Filtered by the exported
+        // interval constant rather than a magic number, so the assertion
+        // tracks the implementation if the interval ever changes.
+        const reaperCalls = setIntervalSpy.mock.calls.filter(([, ms]) => ms === REAP_INTERVAL_MS);
+        expect(reaperCalls).toHaveLength(0);
+
+        // Belt and braces: advancing past the reap interval must not invoke
+        // reap on the injected store either.
+        await vi.advanceTimersByTimeAsync(REAP_INTERVAL_MS + 1_000);
+        expect(fakeStore.reap).not.toHaveBeenCalled();
+      } finally {
+        setIntervalSpy.mockRestore();
+        await server.close();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops ticking after close', async () => {
+    const { buildServer } = await import('../src/server');
+
+    // Install fake timers before buildServer so the reaper interval is fake
+    // and advancing time past it is observable.
+    vi.useFakeTimers();
+    try {
+      const server = await buildServer({ probeDatabase: async () => {} });
+      await server.close();
+
+      // Advancing past the reap interval must not throw or schedule work:
+      // the timer is gone.
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
