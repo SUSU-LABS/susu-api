@@ -123,8 +123,6 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             ),
           );
 
-        const expiresAt = new Date(Date.now() + REGISTRATION_TTL_MS);
-
         // The cap is checked against the claim being *replaced*, so re-registering
         // an address an account already holds is never refused for being at the
         // limit — otherwise the one case that should always work would fail.
@@ -141,7 +139,7 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         if (alreadyMine) {
           const updated = await tx
             .update(groupRegistrations)
-            .set({ expiresAt })
+            .set({ expiresAt: sql`now() + (${REGISTRATION_TTL_MS} * interval '1 millisecond')` })
             .where(
               and(
                 eq(groupRegistrations.contractId, contractId),
@@ -153,10 +151,14 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             )
             .returning({ expiresAt: groupRegistrations.expiresAt });
 
+          if (updated[0] === undefined) {
+            throw new Error(`Failed to update registration for contract ${contractId}`);
+          }
+
           return {
             outcome: 'registered',
             contractId,
-            expiresAt: (updated[0]?.expiresAt ?? expiresAt).toISOString(),
+            expiresAt: updated[0].expiresAt.toISOString(),
           } as const;
         }
 
@@ -165,7 +167,11 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         // existing holder keeps it and this account learns it is registered.
         const inserted = await tx
           .insert(groupRegistrations)
-          .values({ contractId, registeredBy: userId, expiresAt })
+          .values({
+            contractId,
+            registeredBy: userId,
+            expiresAt: sql`now() + (${REGISTRATION_TTL_MS} * interval '1 millisecond')`,
+          })
           .onConflictDoNothing({ target: groupRegistrations.contractId })
           .returning({ expiresAt: groupRegistrations.expiresAt });
 
@@ -182,10 +188,14 @@ export function createRegistrationStore(db: Database): RegistrationStore {
           .from(groupRegistrations)
           .where(eq(groupRegistrations.contractId, contractId));
 
+        if (!holder[0]) {
+          throw new Error(`Registration disappeared during conflict resolution for ${contractId}`);
+        }
+
         return {
           outcome: 'registered',
           contractId,
-          expiresAt: (holder[0]?.expiresAt ?? expiresAt).toISOString(),
+          expiresAt: holder[0].expiresAt.toISOString(),
         } as const;
       });
     },
