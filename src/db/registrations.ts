@@ -189,12 +189,16 @@ export function createRegistrationStore(db: Database): RegistrationStore {
           .from(groupRegistrations)
           .where(eq(groupRegistrations.contractId, contractId));
 
+        const registration = holder[0];
+        if (registration === undefined) {
+          // A concurrent deletion must not produce a successful response with
+          // an expiry that was never stored. Roll back and let the caller retry.
+          throw new Error('Registration disappeared before its expiry could be read.');
+        }
         return {
           outcome: 'registered',
           contractId,
-          expiresAt:
-            holder[0]?.expiresAt.toISOString() ??
-            new Date(Date.now() + REGISTRATION_TTL_MS).toISOString(),
+          expiresAt: registration.expiresAt.toISOString(),
         } as const;
       });
     },

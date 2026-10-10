@@ -271,3 +271,24 @@ describe('createRegistrationStore.register', () => {
     }
   });
 });
+
+it('never reports a made-up expiry when no registration row survives', async () => {
+  // A trigger suppresses the insert to exercise the no-row result against SQL,
+  // including the final lookup, rather than mocking the query chain.
+  await testDb.exec(`
+    CREATE FUNCTION public.suppress_registration() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RETURN NULL; END $$;
+    CREATE TRIGGER suppress_registration BEFORE INSERT ON public.group_registrations
+      FOR EACH ROW EXECUTE FUNCTION public.suppress_registration();
+  `);
+  try {
+    await expect(
+      store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE }),
+    ).rejects.toThrow('Registration disappeared');
+    expect(await store.isRegistered(GROUP_CONTRACT_ID)).toBe(false);
+  } finally {
+    await testDb.exec(
+      'DROP TRIGGER suppress_registration ON public.group_registrations; DROP FUNCTION public.suppress_registration();',
+    );
+  }
+});
