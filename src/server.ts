@@ -15,6 +15,7 @@ import { createWalletLinkStore, type WalletLinkStore } from './db/wallet';
 import { createInviteStore, type InviteStore } from './db/invites';
 import { createRegistrationStore, type RegistrationStore } from './db/registrations';
 import { createNotificationReadModel, type NotificationReadModel } from './db/notifications';
+import { createNotificationSweeper, type NotificationSweeper } from './db/notification-sweep';
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
@@ -52,6 +53,8 @@ export type BuildServerOptions = {
   inviteStore?: InviteStore;
   registrations?: RegistrationStore;
   notificationReadModel?: NotificationReadModel;
+  notificationSweeper?: NotificationSweeper;
+  notificationSweepIntervalMs?: number;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
   trustProxy?: FastifyServerOptions['trustProxy'];
@@ -267,9 +270,27 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   // "this is the real service": a test that supplies a store does not want a
   // background timer, and one that does not will not live long enough to see
   // this fire.
+  const timers: ReturnType<typeof setInterval>[] = [];
+
   if (options.walletLinkStore === undefined) {
-    startNonceReaping(walletLinkStore, app.log);
+    timers.push(startNonceReaping(walletLinkStore, app.log));
   }
+
+  // The notification sweep's application-level fallback. pg_cron normally runs
+  // `derive_notifications` on a schedule, but the migration deliberately
+  // tolerates pg_cron being absent — on such a database this timer is the only
+  // thing deriving notifications. The sweep is idempotent (unique index on
+  // (user_id, kind, source_event_identity), plus the notification_examined
+  // tombstones), so racing pg_cron or another instance writes nothing twice.
+  const notificationSweeper = options.notificationSweeper ?? createNotificationSweeper(getDb());
+  const sweepIntervalMs = options.notificationSweepIntervalMs ?? env.NOTIFICATION_SWEEP_INTERVAL_MS;
+  timers.push(startNotificationSweeping(notificationSweeper, app.log, sweepIntervalMs));
+
+  app.addHook('onClose', async () => {
+    for (const timer of timers) {
+      clearInterval(timer);
+    }
+  });
 
   return app;
 }
@@ -313,6 +334,53 @@ export function startNonceReaping(
   }, intervalMs);
 
   // Housekeeping must never be the reason the process stays alive.
+  timer.unref();
+
+  return timer;
+}
+
+/**
+ * Derives notifications from chain events on a timer, as the application-level
+ * fallback for databases where pg_cron is absent.
+ *
+ * pg_cron normally runs `derive_notifications` on a schedule, but the migration
+ * deliberately tolerates it being missing — on such a database nothing would
+ * ever derive notifications without this timer. The sweep is idempotent by
+ * identity (see `db/notification-sweep.ts`), so overlapping with pg_cron or
+ * with another instance writes nothing twice; the loser simply finds no new
+ * events to derive from.
+ *
+ * A failure is logged and retried on the next tick. Missing notifications are
+ * not a reason to take the service down.
+ */
+export function startNotificationSweeping(
+  sweeper: Pick<NotificationSweeper, 'sweep'>,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+  intervalMs: number = 60_000,
+): ReturnType<typeof setInterval> {
+  const run = () => {
+    sweeper
+      .sweep()
+      .then((result) => {
+        if (result.written > 0) {
+          log.info(
+            { event: 'notification_sweep', ...result },
+            'derived notifications from chain events',
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn({ event: 'notification_sweep_failed', err: error }, 'notification sweep failed');
+      });
+  };
+
+  // Run once at boot so a restart catches up immediately instead of waiting for
+  // the first tick. Idempotent, so this is safe alongside pg_cron.
+  run();
+
+  const timer = setInterval(run, intervalMs);
+
+  // The sweep must never be the reason the process stays alive.
   timer.unref();
 
   return timer;

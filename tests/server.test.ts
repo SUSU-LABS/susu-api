@@ -301,3 +301,79 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('startNotificationSweeping', () => {
+  it('runs immediately at boot and then on each interval', async () => {
+    const { startNotificationSweeping } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => ({ events: 5, written: 2, rounds: 1 }));
+      const log = { info: vi.fn(), warn: vi.fn() };
+
+      const timer = startNotificationSweeping({ sweep }, log as never, 1_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'notification_sweep', written: 2 }),
+        expect.any(String),
+      );
+
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('survives a failing sweep, which is logged rather than fatal', async () => {
+    const { startNotificationSweeping } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const sweep = vi.fn(async () => {
+        throw new Error('database connection lost');
+      });
+      const log = { info: vi.fn(), warn: vi.fn() };
+
+      const timer = startNotificationSweeping({ sweep }, log as never, 1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'notification_sweep_failed' }),
+        expect.any(String),
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweep).toHaveBeenCalledTimes(3);
+
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the sweep timer on app close', async () => {
+    const { buildServer } = await import('../src/server');
+    const sweep = vi.fn(async () => ({ events: 0, written: 0, rounds: 0 }));
+
+    const server = await buildServer({
+      probeDatabase: async () => {},
+      notificationSweeper: { sweep },
+      notificationSweepIntervalMs: 500,
+    });
+
+    expect(sweep).toHaveBeenCalledTimes(1);
+    await server.close();
+
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      // Since server closed, timer was cleared, so no further calls occur.
+      expect(sweep).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
