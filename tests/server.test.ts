@@ -300,4 +300,52 @@ describe('expired wallet-link nonces', () => {
       vi.useRealTimers();
     }
   });
+
+  it('clears the reaping interval when the server is closed', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const fakeStore = { reap, create: vi.fn(), consume: vi.fn() } as never;
+      const appWithReaper = await buildServer({
+        walletLinkStore: fakeStore,
+        autoReapNonces: true,
+      });
+
+      // Advance by 15 minutes to verify reaper is active
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      expect(reap).toHaveBeenCalledTimes(1);
+
+      // Closing the server must clear the interval
+      await appWithReaper.close();
+
+      // Advancing time further must not trigger any further ticks
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      expect(reap).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not start a background reaper when autoReapNonces is false', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const fakeStore = { reap, create: vi.fn(), consume: vi.fn() } as never;
+      const appWithoutReaper = await buildServer({
+        walletLinkStore: fakeStore,
+        autoReapNonces: false,
+      });
+
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+      expect(reap).not.toHaveBeenCalled();
+
+      await appWithoutReaper.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
