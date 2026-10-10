@@ -92,7 +92,13 @@ async function seedContribution(round: number, amount: string, ledger: number, t
   );
 }
 
-async function seedPayout(round: number, recipient: string, amount: string, ledger: number, tag = '') {
+async function seedPayout(
+  round: number,
+  recipient: string,
+  amount: string,
+  ledger: number,
+  tag = '',
+) {
   await test.query(
     `insert into public.payouts
        (event_identity, contract_id, recipient, round, recipient_amount, ledger, tx_hash)
