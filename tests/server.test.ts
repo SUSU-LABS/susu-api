@@ -301,3 +301,18 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('server lifecycle and database pool teardown', () => {
+  it('closes the database pool when the server closes', async () => {
+    const { buildServer } = await import('../src/server');
+    const { getPool } = await import('../src/db/client');
+
+    const pool = getPool();
+    expect(pool.ended).toBe(false);
+
+    const testApp = await buildServer({ probeDatabase: async () => {} });
+    await testApp.close();
+
+    expect(pool.ended).toBe(true);
+  });
+});
