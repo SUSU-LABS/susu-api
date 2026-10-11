@@ -56,9 +56,10 @@ export function getDb(): NodePgDatabase<typeof schema> {
 }
 
 export async function closeDb(): Promise<void> {
-  if (pool !== undefined) {
-    await pool.end();
+  const p = pool;
+  if (p !== undefined) {
     pool = undefined;
     database = undefined;
+    await p.end();
   }
 }
