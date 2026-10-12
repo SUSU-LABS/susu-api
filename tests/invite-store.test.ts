@@ -87,6 +87,61 @@ async function redemptionCount(inviteId: string): Promise<number> {
   return rows[0]?.['count'] as number;
 }
 
+describe('a code used against the wrong group', () => {
+  it('is not_found and writes nothing', async () => {
+    const invite = await seedInvite(2);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: OTHER_CONTRACT_ID,
+    });
+
+    // Same answer as an unknown code — it confirms nothing about the code's
+    // real group — and decided before the transaction wrote anything.
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+
+    // The code is untouched: the same user can still join the group the code
+    // actually names, and that join spends exactly one use.
+    const join = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: GROUP_CONTRACT_ID,
+    });
+    expect(join).toEqual({
+      outcome: 'redeemed',
+      inviteId: invite.id,
+      groupContractId: GROUP_CONTRACT_ID,
+      claimed: true,
+    });
+    expect(await usesOf(invite.id)).toBe(1);
+    expect(await redemptionCount(invite.id)).toBe(1);
+  });
+
+  it('re-checks the group inside the transaction', async () => {
+    // The preview is courtesy; the transaction is the authority. A race that
+    // mutated the row between them still ends in not_found — verified here by
+    // asking with the wrong group and proving no rows ever appeared.
+    const invite = await seedInvite(2);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: OTHER_CONTRACT_ID,
+      shouldClaim: async () => true,
+    });
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+  });
+});
+
 describe('a claim that is withheld', () => {
   it('reports the group, and writes nothing', async () => {
     const invite = await seedInvite(1);

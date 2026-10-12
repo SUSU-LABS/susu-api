@@ -103,6 +103,13 @@ export type InviteStore = {
   redeem(input: {
     code: string;
     userId: string;
+    /**
+     * When the caller already knows which group the join is for, the code must
+     * name that same group. A mismatch is `not_found` — the code exists but is
+     * not for that group — and, importantly, decided before anything is
+     * written so a wrong-group join can never spend a use.
+     */
+    expectedGroup?: string;
     shouldClaim?: (groupContractId: string) => Promise<boolean>;
   }): Promise<RedeemOutcome>;
 };
@@ -138,7 +145,7 @@ export function createInviteStore(db: Database): InviteStore {
       return toRecord(row);
     },
 
-    async redeem({ code, userId, shouldClaim }) {
+    async redeem({ code, userId, expectedGroup, shouldClaim }) {
       // The claim decision needs I/O (a group-status read on the shared pool),
       // so it is resolved here, before the transaction opens. Awaiting it while
       // holding the invite row lock would hold the lock across a network round
@@ -157,6 +164,12 @@ export function createInviteStore(db: Database): InviteStore {
         .limit(1);
 
       if (preview === undefined) return { outcome: 'not_found' } as const;
+      // A code for a different group is not_found for this caller — and it is
+      // decided here, before the transaction opens, so the mismatch never
+      // writes an `invite_redemptions` row or flips `uses`.
+      if (expectedGroup !== undefined && preview.groupContractId !== expectedGroup) {
+        return { outcome: 'not_found' } as const;
+      }
       if (preview.revokedAt !== null) return { outcome: 'revoked' } as const;
       if (preview.expiresAt !== null && preview.expiresAt.getTime() <= Date.now()) {
         return { outcome: 'expired' } as const;
@@ -194,6 +207,9 @@ export function createInviteStore(db: Database): InviteStore {
 
         const invite = locked[0];
         if (invite === undefined) return { outcome: 'not_found' } as const;
+        if (expectedGroup !== undefined && invite.groupContractId !== expectedGroup) {
+          return { outcome: 'not_found' } as const;
+        }
         if (invite.revokedAt !== null) return { outcome: 'revoked' } as const;
         if (invite.expiresAt !== null && invite.expiresAt.getTime() <= Date.now()) {
           return { outcome: 'expired' } as const;

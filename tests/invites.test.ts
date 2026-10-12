@@ -34,14 +34,18 @@ function fakeStore(): FakeStore {
       uses: 0,
       createdAt: new Date(0).toISOString(),
     })),
-    redeem: vi.fn(
-      async () =>
-        ({
-          outcome: 'redeemed',
-          inviteId: 'invite-id',
-          groupContractId: GROUP_CONTRACT_ID,
-        }) as RedeemOutcome,
-    ),
+    redeem: vi.fn(async (input: Record<string, unknown>) => {
+      // Same contract as the real store: a code whose group disagrees with the
+      // path is not_found, decided before any write.
+      if (input['expectedGroup'] !== undefined && input['expectedGroup'] !== GROUP_CONTRACT_ID) {
+        return { outcome: 'not_found' } as RedeemOutcome;
+      }
+      return {
+        outcome: 'redeemed',
+        inviteId: 'invite-id',
+        groupContractId: GROUP_CONTRACT_ID,
+      } as RedeemOutcome;
+    }),
   } as unknown as FakeStore;
 }
 
@@ -322,6 +326,7 @@ describe('POST /api/v1/invites/redeem', () => {
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroup: undefined,
       shouldClaim: expect.any(Function),
     });
   });
@@ -512,25 +517,31 @@ describe('POST /api/v1/groups/:contractId/join', () => {
       groupContractId: GROUP_CONTRACT_ID,
       inviteId: 'invite-id',
     });
-    // The store is also asked whether this redemption should spend a use. The
-    // answer is exercised in its own block below; here only the call shape matters.
+    // The store is also asked whether this redemption should spend a use, and
+    // told which group the path names so a mismatch costs no use.
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroup: GROUP_CONTRACT_ID,
       shouldClaim: expect.any(Function),
     });
   });
 
   it('reports a code for a different group as absent', async () => {
+    // The code resolves to a group other than the one in the path, so the
+    // store's answer is not_found — decided before any write, which is the
+    // whole point of putting the group in the claim decision.
     const store = fakeStore();
-    store.redeem = vi.fn(
-      async () =>
-        ({
-          outcome: 'redeemed',
-          inviteId: 'invite-id',
-          groupContractId: OTHER_CONTRACT_ID,
-        }) as RedeemOutcome,
-    );
+    store.redeem = vi.fn(async (input: Record<string, unknown>) => {
+      if (input['expectedGroup'] !== OTHER_CONTRACT_ID) {
+        return { outcome: 'not_found' } as RedeemOutcome;
+      }
+      return {
+        outcome: 'redeemed',
+        inviteId: 'invite-id',
+        groupContractId: OTHER_CONTRACT_ID,
+      } as RedeemOutcome;
+    });
     const { app } = await harness({ store });
 
     const response = await app.inject({
@@ -546,6 +557,13 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     // about the code.
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: 'invite_not_found' });
+
+    // The group was part of the claim decision: the store decided not_found
+    // before writing, rather than the route discovering the mismatch after a
+    // spent use.
+    expect(store.redeem).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedGroup: GROUP_CONTRACT_ID }),
+    );
   });
 
   it('accepts a code whose group matches the path', async () => {
