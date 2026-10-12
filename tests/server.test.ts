@@ -301,3 +301,84 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('notification sweep on timer', () => {
+  it('sweeps on the interval so a pg_cron-less database still derives', async () => {
+    const { startNotificationSweep } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const calls: number[] = [];
+      const sweeper = {
+        sweep: vi.fn(async () => {
+          calls.push(calls.length);
+          return { events: 0, written: 0, rounds: 0 };
+        }),
+      };
+      const log = { info: vi.fn(), warn: vi.fn() };
+
+      const timer = startNotificationSweep(sweeper as never, log as never, 1_000);
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(calls.length).toBe(3);
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs a failure and keeps running rather than crashing', async () => {
+    const { startNotificationSweep } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const sweeper = {
+        sweep: vi.fn(async () => {
+          n += 1;
+          if (n === 1) throw new Error('db unreachable');
+          return { events: 0, written: 0, rounds: 0 };
+        }),
+      };
+      const log = { info: vi.fn(), warn: vi.fn() };
+
+      const timer = startNotificationSweep(sweeper as never, log as never, 1_000);
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(n).toBe(3);
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'notification_sweep_failed' }),
+        'notification sweep failed',
+      );
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops sweeping once the interval is cleared on app.close()', async () => {
+    const { startNotificationSweep } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const calls: number[] = [];
+      const sweeper = {
+        sweep: vi.fn(async () => {
+          calls.push(calls.length);
+          return { events: 0, written: 0, rounds: 0 };
+        }),
+      };
+      const log = { info: vi.fn(), warn: vi.fn() };
+
+      const timer = startNotificationSweep(sweeper as never, log as never, 1_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      clearInterval(timer);
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(calls.length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+

@@ -15,6 +15,7 @@ import { createWalletLinkStore, type WalletLinkStore } from './db/wallet';
 import { createInviteStore, type InviteStore } from './db/invites';
 import { createRegistrationStore, type RegistrationStore } from './db/registrations';
 import { createNotificationReadModel, type NotificationReadModel } from './db/notifications';
+import { createNotificationSweeper, type NotificationSweeper } from './db/notification-sweep';
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
@@ -52,6 +53,7 @@ export type BuildServerOptions = {
   inviteStore?: InviteStore;
   registrations?: RegistrationStore;
   notificationReadModel?: NotificationReadModel;
+  notificationSweeper?: NotificationSweeper;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
   trustProxy?: FastifyServerOptions['trustProxy'];
@@ -271,6 +273,14 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     startNonceReaping(walletLinkStore, app.log);
   }
 
+  if (options.notificationSweeper === undefined) {
+    const sweeper = createNotificationSweeper(getDb());
+    const sweepTimer = startNotificationSweep(sweeper, app.log);
+    app.addHook('onClose', async () => {
+      clearInterval(sweepTimer);
+    });
+  }
+
   return app;
 }
 
@@ -317,3 +327,36 @@ export function startNonceReaping(
 
   return timer;
 }
+
+/** How often notifications are derived when pg_cron is unavailable. */
+const SWEEP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Runs the notification sweeper on a timer.
+ *
+ * Housekeeping fallback for environments without pg_cron. Errors are logged and
+ * retried on the next tick, and unref ensures the process is not kept alive.
+ */
+export function startNotificationSweep(
+  sweeper: NotificationSweeper,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+  intervalMs: number = SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweeper
+      .sweep()
+      .then((result) => {
+        if (result.events > 0 || result.written > 0) {
+          log.info({ event: 'notification_sweep', ...result }, 'derived pending notifications');
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn({ event: 'notification_sweep_failed', err: error }, 'notification sweep failed');
+      });
+  }, intervalMs);
+
+  timer.unref();
+
+  return timer;
+}
+
