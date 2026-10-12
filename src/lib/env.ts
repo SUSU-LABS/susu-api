@@ -19,6 +19,7 @@ const accountIdSchema = z.union([z.string().regex(/^G[A-Z2-7]{55}$/), z.literal(
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().max(65535).default(3000),
+  SOROBAN_SIMULATE_TIMEOUT_MS: z.coerce.number().int().positive().max(120_000).default(10_000),
   HOST: z.string().min(1).default('0.0.0.0'),
 
   // Database. The API holds no custody; the database is a rebuildable index.
