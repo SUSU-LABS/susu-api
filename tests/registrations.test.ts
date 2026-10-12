@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createRegistrationStore,
   MAX_LIVE_REGISTRATIONS,
@@ -54,6 +54,27 @@ afterAll(async () => {
 });
 
 describe('createRegistrationStore.register', () => {
+  it('derives expiry from the database clock regardless of application skew', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 6 * 60 * 60 * 1000);
+    const realNow = Date.now();
+    try {
+      const result = await store.register({
+        contractId: distinctContractId(0),
+        userId: USER_ONE,
+      });
+      expect(result.outcome).toBe('registered');
+      if (result.outcome !== 'registered') return;
+
+      const expiresAt = Date.parse(result.expiresAt);
+      expect(expiresAt).toBeGreaterThan(realNow + REGISTRATION_TTL_MS - 10_000);
+      expect(expiresAt).toBeLessThan(realNow + REGISTRATION_TTL_MS + 60_000);
+      expect(expiresAt).toBeLessThan(realNow + 60 * 60 * 1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('makes an address known', async () => {
     const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
 
