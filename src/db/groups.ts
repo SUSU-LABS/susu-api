@@ -406,6 +406,17 @@ export function createGroupReadModel(db: NodePgDatabase<typeof schema>): GroupRe
       // Aggregated in SQL rather than by folding the contribution list in
       // JavaScript: the sum stays a `numeric` in the database, so no total is
       // ever assembled from values that have already been through a JS number.
+      //
+      // The payout/recipient/fee columns are `max()` aggregates, not plain
+      // scalar selects. A scalar subquery that matches two or more rows is a
+      // hard Postgres error ("more than one row returned by a subquery used as
+      // an expression"), which surfaces as a 500 on `getGroup` the first time a
+      // round carries a duplicate payout or fee row (e.g. a rebroadcast event).
+      // `max()` collapses any number of rows to one defined value, so the read
+      // is robust either way: one row -> that row's value (the happy path,
+      // unchanged); zero rows -> NULL (as before); many -> the max, which is
+      // deterministic. Only columns the query already selects are used, so no
+      // new indexer-owned column is assumed.
       const roundRows = await queryRows(sql`
         with rounds as (
           select round from public.contributions where contract_id = ${contractId}
@@ -418,11 +429,11 @@ export function createGroupReadModel(db: NodePgDatabase<typeof schema>): GroupRe
             where c.contract_id = ${contractId} and c.round = r.round) as contribution_count,
           (select coalesce(sum(c.amount), 0)::text from public.contributions c
             where c.contract_id = ${contractId} and c.round = r.round) as contributed,
-          (select p.recipient_amount::text from public.payouts p
+          (select max(p.recipient_amount)::text from public.payouts p
             where p.contract_id = ${contractId} and p.round = r.round) as payout,
-          (select p.recipient from public.payouts p
+          (select max(p.recipient) from public.payouts p
             where p.contract_id = ${contractId} and p.round = r.round) as recipient,
-          (select f.fee::text from public.protocol_fees f
+          (select max(f.fee)::text from public.protocol_fees f
             where f.contract_id = ${contractId} and f.round = r.round) as fee
         from rounds r
         order by r.round
