@@ -285,6 +285,23 @@ describe('POST /api/v1/groups/:contractId/invites', () => {
 
     expect(response.headers['cache-control']).toBe('no-store');
   });
+
+  it('refuses an account that mints codes past the limit', async () => {
+    const { app } = await harness();
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        payload: {},
+      });
+      statuses.push(response.statusCode);
+    }
+    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(201));
+    expect(statuses[10]).toBe(429);
+  });
 });
 
 describe('POST /api/v1/invites/redeem', () => {
