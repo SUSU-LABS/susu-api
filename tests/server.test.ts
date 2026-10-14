@@ -301,3 +301,33 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('nonce-reaper lifecycle (#52)', () => {
+  it('clears the interval when the server closes', async () => {
+    const clearSpy = vi.spyOn(global, 'clearInterval');
+    const { buildServer } = await import('../src/server');
+    const server = await buildServer({ probeDatabase: async () => {} });
+    try {
+      await server.close();
+      expect(clearSpy).toHaveBeenCalled();
+    } finally {
+      clearSpy.mockRestore();
+    }
+  });
+
+  it('starts no background timer when a store is injected', async () => {
+    const intervalSpy = vi.spyOn(global, 'setInterval');
+    const { buildServer } = await import('../src/server');
+    const server = await buildServer({
+      probeDatabase: async () => {},
+      walletLinkStore: { reap: async () => 0 } as never,
+    });
+    try {
+      // Supplying the store means the caller owns lifecycle — no timer starts.
+      expect(intervalSpy).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+      intervalSpy.mockRestore();
+    }
+  });
+});

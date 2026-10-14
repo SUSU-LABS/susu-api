@@ -268,7 +268,13 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   // background timer, and one that does not will not live long enough to see
   // this fire.
   if (options.walletLinkStore === undefined) {
-    startNonceReaping(walletLinkStore, app.log);
+    // The handle is kept so close() stops the interval: an uncleared timer
+    // survives the server, keeps a lazy pool alive past shutdown, and ticks
+    // into a dead process in tests that never opted into background work.
+    const reaper = startNonceReaping(walletLinkStore, app.log);
+    app.addHook('onClose', async () => {
+      clearInterval(reaper);
+    });
   }
 
   return app;
