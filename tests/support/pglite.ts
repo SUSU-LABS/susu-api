@@ -1,3 +1,4 @@
+import type { Logger } from 'drizzle-orm/logger';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -90,7 +91,7 @@ export type TestDb = {
  * they are the same shims CI applies before validating the guards, so a
  * migration that only works against a real Supabase project fails here too.
  */
-export async function createTestDb(): Promise<TestDb> {
+export async function createTestDb(logger?: Logger): Promise<TestDb> {
   const pglite = new PGlite();
   await pglite.exec(stripMetaCommands(read('tests/db/bootstrap_supabase_shims.sql')));
 
@@ -100,7 +101,7 @@ export async function createTestDb(): Promise<TestDb> {
     }
   }
 
-  const db = drizzle(pglite, { schema }) as unknown as TestDatabase;
+  const db = drizzle(pglite, { schema, logger }) as unknown as TestDatabase;
 
   return {
     db,
