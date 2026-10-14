@@ -285,6 +285,96 @@ describe('POST /api/v1/groups/:contractId/invites', () => {
 
     expect(response.headers['cache-control']).toBe('no-store');
   });
+
+  it('refuses an authenticated account exceeding the rate limit with 429', async () => {
+    const { app, store } = await harness();
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        payload: {},
+      });
+      statuses.push(response.statusCode);
+    }
+
+    expect(statuses.slice(0, 20).every((status) => status === 201)).toBe(true);
+    expect(statuses[20]).toBe(429);
+    expect(store.create).toHaveBeenCalledTimes(20);
+  });
+
+  it('refuses an authenticated user exceeding their budget across distinct IP addresses', async () => {
+    const { app, store } = await harness();
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        remoteAddress: `198.51.100.${attempt + 1}`,
+        payload: {},
+      });
+      statuses.push(response.statusCode);
+    }
+
+    expect(statuses.slice(0, 20).every((status) => status === 201)).toBe(true);
+    expect(statuses[20]).toBe(429);
+    expect(store.create).toHaveBeenCalledTimes(20);
+  });
+
+  it('allows distinct authenticated users their own invite creation budgets', async () => {
+    const { buildServer } = await import('../src/server');
+    const store = fakeStore();
+    const groupExists = vi.fn(async () => true);
+    const groupStatus = vi.fn(async () => 'open' as GroupStatus);
+    const isRegistered = vi.fn(async () => false);
+
+    const verify = vi.fn(async (token: string) => ({
+      id: token === 'token-alice' ? 'user-alice' : 'user-bob',
+      email: `${token}@example.com`,
+    }));
+
+    const app = await buildServer({
+      probeDatabase: async () => {},
+      verifyToken: verify as unknown as TokenVerifier,
+      inviteStore: store,
+      registrations: { register: vi.fn(), isRegistered } as never,
+      readModel: {
+        groupExists,
+        groupStatus,
+      } as never,
+    });
+    built.push(app);
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: { authorization: 'Bearer token-alice' },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(201);
+    }
+
+    const aliceBlocked = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+      headers: { authorization: 'Bearer token-alice' },
+      payload: {},
+    });
+    expect(aliceBlocked.statusCode).toBe(429);
+
+    const bobAllowed = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+      headers: { authorization: 'Bearer token-bob' },
+      payload: {},
+    });
+    expect(bobAllowed.statusCode).toBe(201);
+  });
 });
 
 describe('POST /api/v1/invites/redeem', () => {
