@@ -123,7 +123,14 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             ),
           );
 
-        const expiresAt = new Date(Date.now() + REGISTRATION_TTL_MS);
+        // The expiry is computed by the database, not by us. `expiresAt` is
+        // compared against the database's `now()` everywhere it is read —
+        // `isRegistered`, the delete above — and `created_at` defaults to that
+        // same clock, so an expiry derived from this process's clock could be
+        // shifted by host skew: a fast host shortens the window, a slow host
+        // can push `expires_at` past `created_at` and trip the
+        // `window_positive` constraint outright.
+        const expiresAt = sql<Date>`now() + make_interval(secs => ${REGISTRATION_TTL_MS / 1000})`;
 
         // The cap is checked against the claim being *replaced*, so re-registering
         // an address an account already holds is never refused for being at the
@@ -156,7 +163,12 @@ export function createRegistrationStore(db: Database): RegistrationStore {
           return {
             outcome: 'registered',
             contractId,
-            expiresAt: (updated[0]?.expiresAt ?? expiresAt).toISOString(),
+            // The update matched nothing only when the row moved to another
+            // account mid-transaction; the reported expiry is then a
+            // display-only estimate, so the process clock is fine to use.
+            expiresAt: (
+              updated[0]?.expiresAt ?? new Date(Date.now() + REGISTRATION_TTL_MS)
+            ).toISOString(),
           } as const;
         }
 
@@ -185,7 +197,11 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         return {
           outcome: 'registered',
           contractId,
-          expiresAt: (holder[0]?.expiresAt ?? expiresAt).toISOString(),
+          // As above: a missing holder row means the claim transferred to
+          // someone else, so the estimate is display-only.
+          expiresAt: (
+            holder[0]?.expiresAt ?? new Date(Date.now() + REGISTRATION_TTL_MS)
+          ).toISOString(),
         } as const;
       });
     },
