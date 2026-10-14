@@ -15,6 +15,7 @@ import { createWalletLinkStore, type WalletLinkStore } from './db/wallet';
 import { createInviteStore, type InviteStore } from './db/invites';
 import { createRegistrationStore, type RegistrationStore } from './db/registrations';
 import { createNotificationReadModel, type NotificationReadModel } from './db/notifications';
+import { createNotificationSweeper, type NotificationSweeper } from './db/notification-sweep';
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
@@ -52,6 +53,7 @@ export type BuildServerOptions = {
   inviteStore?: InviteStore;
   registrations?: RegistrationStore;
   notificationReadModel?: NotificationReadModel;
+  notificationSweeper?: NotificationSweeper;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
   trustProxy?: FastifyServerOptions['trustProxy'];
@@ -271,6 +273,20 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     startNonceReaping(walletLinkStore, app.log);
   }
 
+  // pg_cron schedules derivation on hosted projects, but on a database without
+  // it — a developer's, or CI — nothing would ever run the sweeper and no
+  // notification would ever arrive. The timer is the same fallback: when the
+  // real store is in use, derivation runs on an interval and is cleared on
+  // close. On a pg_cron database this is a redundant once-a-minute no-op —
+  // derive_notifications is idempotent, so a double schedule is harmless.
+  if (options.notificationSweeper === undefined) {
+    const sweeper = createNotificationSweeper(getDb());
+    const sweepTimer = startNotificationSweep(sweeper, app.log, env.NOTIFICATION_SWEEP_INTERVAL_MS);
+    app.addHook('onClose', async () => {
+      clearInterval(sweepTimer);
+    });
+  }
+
   return app;
 }
 
@@ -309,6 +325,40 @@ export function startNonceReaping(
       })
       .catch((error: unknown) => {
         log.warn({ event: 'nonce_reap_failed', err: error }, 'could not clear expired nonces');
+      });
+  }, intervalMs);
+
+  // Housekeeping must never be the reason the process stays alive.
+  timer.unref();
+
+  return timer;
+}
+
+/** How often notifications are derived when pg_cron does not schedule it. */
+const SWEEP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Runs the notification sweeper on a timer.
+ *
+ * Same housekeeping contract as `startNonceReaping`: a failure is logged and
+ * retried on the next tick — a swept table is housekeeping, not a reason to
+ * take the service down — and the timer never keeps the process alive.
+ */
+export function startNotificationSweep(
+  sweeper: NotificationSweeper,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+  intervalMs: number = SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweeper
+      .sweep()
+      .then((result) => {
+        if (result.events > 0 || result.written > 0) {
+          log.info({ event: 'notification_sweep', ...result }, 'derived pending notifications');
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn({ event: 'notification_sweep_failed', err: error }, 'notification sweep failed');
       });
   }, intervalMs);
 
