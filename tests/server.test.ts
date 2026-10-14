@@ -11,10 +11,27 @@ beforeAll(async () => {
   // The readiness probe is injected so the suite does not need a database. The
   // real probe's failure path is covered explicitly below.
   app = await buildServer({ probeDatabase: async () => {} });
-});
+  // buildServer is the cold path: the suite's every route registers here.
+}, 30000);
 
 afterAll(async () => {
   await app?.close();
+});
+
+describe('database lifecycle', () => {
+  it('closing the app ends the connection pool', async () => {
+    const client = await import('../src/db/client');
+    const endSpy = vi.spyOn(client, 'closeDb');
+    const { buildServer } = await import('../src/server');
+    const server = await buildServer({ probeDatabase: async () => {} });
+
+    await server.close();
+
+    // The pool close rides the app's onClose hook — shutdown returns only
+    // after the pool reports ended, never before.
+    expect(endSpy).toHaveBeenCalledTimes(1);
+    endSpy.mockRestore();
+  });
 });
 
 describe('health routes', () => {
