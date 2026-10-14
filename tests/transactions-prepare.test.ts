@@ -89,6 +89,8 @@ function simulationFailure(error: string): rpc.Api.SimulateTransactionResponse {
 
 type HarnessOptions = {
   simulate?: (transaction: unknown) => Promise<rpc.Api.SimulateTransactionResponse>;
+  /** Deadline override for the RPC simulation; production reads it from env. */
+  simulateTimeoutMs?: number;
   /** Whether the index knows this address as a group. */
   knownGroup?: string;
   /** Whether a just-created address was registered before the index caught up. */
@@ -114,6 +116,7 @@ async function harness(options: HarnessOptions = {}): Promise<{
     probeDatabase: async () => {},
     verifyToken: verify as unknown as TokenVerifier,
     sorobanSimulator: simulate as never,
+    simulateTimeoutMs: options.simulateTimeoutMs,
     readModel: {
       groupExists,
       listGroups: vi.fn(),
@@ -445,5 +448,42 @@ describe('POST /api/v1/transactions/prepare', () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toEqual({ error: 'not_a_single_invocation' });
     expect(simulate).not.toHaveBeenCalled();
+  });
+
+  it('maps a simulation exceeding the deadline to a non-500 upstream failure', async () => {
+    const { app } = await harness({
+      knownGroup: GROUP,
+      simulate: () => new Promise<rpc.Api.SimulateTransactionResponse>(() => {}),
+      simulateTimeoutMs: 50,
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/transactions/prepare',
+      headers: AUTH,
+      payload: { transactionXdr: envelopeXdr(GROUP, 'contribute') },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ error: 'upstream_unavailable' });
+  });
+
+  it('maps a simulator transport error to 502, distinct from contract refusals', async () => {
+    const { app } = await harness({
+      knownGroup: GROUP,
+      simulate: async () => {
+        throw new Error('socket hangup');
+      },
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/transactions/prepare',
+      headers: AUTH,
+      payload: { transactionXdr: envelopeXdr(GROUP, 'contribute') },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: 'upstream_unavailable' });
   });
 });

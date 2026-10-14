@@ -90,6 +90,17 @@ export type PrepareOutcome =
   | { readonly status: 'restore_required'; readonly contractId: string; readonly method: string }
   /** A simulation response this service does not recognise. Never treated as success. */
   | { readonly status: 'unrecognized'; readonly contractId: string; readonly method: string }
+  /**
+   * The RPC itself failed — a transport error or a simulation that exceeded its
+   * configured deadline. Distinct from `refused`, which is the contract's
+   * answer: this means the question never reached a verdict.
+   */
+  | {
+      readonly status: 'upstream_failed';
+      readonly reason: 'timeout' | 'transport';
+      readonly contractId: string;
+      readonly method: string;
+    }
   /** Refused before simulation. */
   | { readonly status: 'invalid'; readonly reason: PrepareRefusal };
 
@@ -159,10 +170,28 @@ export type PrepareOptions = {
    * not know about databases.
    */
   readonly isAllowedContract: (contractId: string) => Promise<boolean>;
+  /**
+   * Deadline for the simulation call, in milliseconds. A hung RPC otherwise
+   * holds the request open indefinitely while consuming the route's
+   * rate-limit budget.
+   */
+  readonly simulateTimeoutMs?: number;
 };
 
+/** Default simulation deadline; the route passes the env-configured value. */
+export const DEFAULT_SIMULATE_TIMEOUT_MS = 10_000;
+
+/** Rejection the timeout race uses, so a deadline is distinct from a transport error. */
+class SimulateTimeout extends Error {
+  constructor() {
+    super('simulation deadline exceeded');
+    this.name = 'SimulateTimeout';
+  }
+}
+
 export async function prepareInvocation(options: PrepareOptions): Promise<PrepareOutcome> {
-  const { envelopeXdr, networkPassphrase, simulate, isAllowedContract } = options;
+  const { envelopeXdr, networkPassphrase, simulate, isAllowedContract, simulateTimeoutMs } =
+    options;
 
   const parsed = parseInvocationEnvelope(envelopeXdr, networkPassphrase);
   if (typeof parsed === 'string') return { status: 'invalid', reason: parsed };
@@ -173,7 +202,33 @@ export async function prepareInvocation(options: PrepareOptions): Promise<Prepar
     return { status: 'invalid', reason: 'contract_not_allowed' };
   }
 
-  const simulation = await simulate(transaction);
+  // Deadline + transport isolation: the RPC is an upstream dependency, and a
+  // failure on it must not look like either a client error or our own 500.
+  let simulation: rpc.Api.SimulateTransactionResponse;
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      simulation = await Promise.race([
+        simulate(transaction),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new SimulateTimeout()),
+            simulateTimeoutMs ?? DEFAULT_SIMULATE_TIMEOUT_MS,
+          );
+          if (typeof timer.unref === 'function') timer.unref();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (error) {
+    return {
+      status: 'upstream_failed',
+      reason: error instanceof SimulateTimeout ? 'timeout' : 'transport',
+      contractId,
+      method,
+    };
+  }
 
   if (rpc.Api.isSimulationError(simulation)) {
     return { status: 'refused', contractId, method, rawError: String(simulation.error) };

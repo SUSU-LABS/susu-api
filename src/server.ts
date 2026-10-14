@@ -54,6 +54,8 @@ export type BuildServerOptions = {
   notificationReadModel?: NotificationReadModel;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
+  /** Override the RPC simulation deadline; env provides the default. */
+  simulateTimeoutMs?: number;
   trustProxy?: FastifyServerOptions['trustProxy'];
   rateLimitMax?: number;
 };
@@ -240,6 +242,7 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     requireAuth,
     readModel: options.transactionReadModel ?? createTransactionReadModel(getDb()),
     simulate: options.sorobanSimulator ?? createSorobanSimulator(env.STELLAR_RPC_URL),
+    simulateTimeoutMs: options.simulateTimeoutMs ?? env.SOROBAN_SIMULATE_TIMEOUT_MS,
     networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
     // The Factory, or a group the index has actually seen. Registrations are
     // deliberately not honoured here: they are unverified claims, and letting

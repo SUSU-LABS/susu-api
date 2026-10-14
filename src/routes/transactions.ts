@@ -30,6 +30,8 @@ export type TransactionRoutesOptions = {
   /** The authenticated-route guard. Injected, as elsewhere, for testability. */
   requireAuth: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   simulate: SorobanSimulator;
+  /** Deadline for the RPC simulation; env-configured, defaulted in prepare. */
+  simulateTimeoutMs?: number;
   isAllowedContract: (contractId: string) => Promise<boolean>;
   networkPassphrase: string;
 };
@@ -87,7 +89,14 @@ export async function transactionRoutes(
   app: FastifyInstance,
   options: TransactionRoutesOptions,
 ): Promise<void> {
-  const { readModel, requireAuth, simulate, isAllowedContract, networkPassphrase } = options;
+  const {
+    readModel,
+    requireAuth,
+    simulate,
+    isAllowedContract,
+    networkPassphrase,
+    simulateTimeoutMs,
+  } = options;
 
   const verifiedUserLimiter = app.createRateLimit({
     max: 20,
@@ -171,6 +180,7 @@ export async function transactionRoutes(
         networkPassphrase,
         simulate,
         isAllowedContract,
+        simulateTimeoutMs,
       });
 
       reply.header('cache-control', 'no-store');
@@ -180,6 +190,16 @@ export async function transactionRoutes(
         // reason is safe to name: it tells a client which of its own mistakes to fix
         // without revealing anything about this service's state.
         return reply.code(400).send({ error: outcome.reason });
+      }
+
+      if (outcome.status === 'upstream_failed') {
+        // The failure belongs to the RPC upstream, so it is a 5xx — but a
+        // distinct one: a transport error is a bad gateway, a deadline that
+        // produced no verdict is a gateway timeout-equivalent surfaced as 503
+        // so clients can retry without thinking the service itself is broken.
+        return reply
+          .code(outcome.reason === 'timeout' ? 503 : 502)
+          .send({ error: 'upstream_unavailable' });
       }
 
       return reply.send({ data: outcome });
