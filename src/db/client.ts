@@ -56,9 +56,13 @@ export function getDb(): NodePgDatabase<typeof schema> {
 }
 
 export async function closeDb(): Promise<void> {
-  if (pool !== undefined) {
-    await pool.end();
+  // Capture and clear synchronously: `onClose` hooks from concurrently
+  // closing servers must not both observe a live pool and double-end it
+  // (pg-pool throws "Called end on pool more than once").
+  const p = pool;
+  if (p !== undefined) {
     pool = undefined;
     database = undefined;
+    await p.end();
   }
 }
