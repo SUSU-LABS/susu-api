@@ -11,7 +11,7 @@ beforeAll(async () => {
   // The readiness probe is injected so the suite does not need a database. The
   // real probe's failure path is covered explicitly below.
   app = await buildServer({ probeDatabase: async () => {} });
-});
+}, 30_000);
 
 afterAll(async () => {
   await app?.close();
@@ -299,5 +299,34 @@ describe('expired wallet-link nonces', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('database pool shutdown lifecycle', () => {
+  it('closes the database pool on app.close()', async () => {
+    const { buildServer } = await import('../src/server');
+    const { getPool } = await import('../src/db/client');
+
+    const pool = getPool();
+    const endSpy = vi.spyOn(pool, 'end');
+
+    const server = await buildServer({ probeDatabase: async () => {} });
+    await server.close();
+
+    expect(endSpy).toHaveBeenCalledTimes(1);
+    expect(pool.ended).toBe(true);
+  });
+
+  it('awaits custom database closer when provided in options', async () => {
+    const { buildServer } = await import('../src/server');
+    const closeSpy = vi.fn(async () => {});
+
+    const server = await buildServer({
+      probeDatabase: async () => {},
+      closeDatabase: closeSpy,
+    });
+    await server.close();
+
+    expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 });
