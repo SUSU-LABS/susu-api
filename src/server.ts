@@ -267,15 +267,44 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   // "this is the real service": a test that supplies a store does not want a
   // background timer, and one that does not will not live long enough to see
   // this fire.
+  //
+  // The timer is tied to the server lifecycle: closing the server clears it,
+  // so a closed server leaves no live interval behind (which could otherwise
+  // lazily create a real DB pool and query after close).
+  let reapTimer: ReturnType<typeof setInterval> | undefined;
+  let reaperClosing = false;
+  // Idempotent: safe to call from the onClose hook, the addHook error path, or
+  // any other shutdown path. The closing flag is set first so that a tick
+  // already queued cannot start new work after close begins — clearInterval
+  // alone cannot stop a tick that has already been dispatched.
+  const stopReaping = () => {
+    reaperClosing = true;
+    if (reapTimer !== undefined) {
+      clearInterval(reapTimer);
+      reapTimer = undefined;
+    }
+  };
   if (options.walletLinkStore === undefined) {
-    startNonceReaping(walletLinkStore, app.log);
+    reapTimer = startNonceReaping(walletLinkStore, app.log, REAP_INTERVAL_MS, () => reaperClosing);
+  }
+  if (reapTimer !== undefined) {
+    try {
+      app.addHook('onClose', async () => {
+        stopReaping();
+      });
+    } catch (error) {
+      // The onClose hook was not registered, so nothing will clear the timer
+      // on shutdown — stop it here to avoid leaking it on this error path.
+      stopReaping();
+      throw error;
+    }
   }
 
   return app;
 }
 
 /** How often spent nonces are cleared. Well inside the five-minute nonce lifetime. */
-const REAP_INTERVAL_MS = 15 * 60 * 1000;
+export const REAP_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
  * Clears spent nonces whose expiry has passed, on a timer.
@@ -298,8 +327,14 @@ export function startNonceReaping(
   store: Pick<WalletLinkStore, 'reap'>,
   log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
   intervalMs: number = REAP_INTERVAL_MS,
+  isClosing: () => boolean = () => false,
 ): ReturnType<typeof setInterval> {
   const timer = setInterval(() => {
+    // A tick dispatched just before close must not start new work:
+    // clearInterval stops future ticks, but cannot recall one already queued.
+    if (isClosing()) {
+      return;
+    }
     store
       .reap(new Date())
       .then((count) => {
