@@ -285,6 +285,60 @@ describe('POST /api/v1/groups/:contractId/invites', () => {
 
     expect(response.headers['cache-control']).toBe('no-store');
   });
+
+  it('rate-limits invite creation per account', async () => {
+    const { app } = await harness();
+
+    // 20 creations succeed; the 21st is refused with 429.
+    for (let i = 0; i < 20; i++) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        payload: {},
+      });
+      expect(response.statusCode).toBe(201);
+    }
+    const limited = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+      headers: AUTH,
+      payload: {},
+    });
+    expect(limited.statusCode).toBe(429);
+  }, 30000);
+
+  it('tracks the invite-creation budget per account, not per IP', async () => {
+    const { app } = await harness();
+    const otherAuth = { authorization: 'Bearer <other-token>' };
+
+    // Exhaust user A's budget.
+    for (let i = 0; i < 20; i++) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        payload: {},
+      });
+      expect(response.statusCode).toBe(201);
+    }
+    const limitedA = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+      headers: AUTH,
+      payload: {},
+    });
+    expect(limitedA.statusCode).toBe(429);
+
+    // A different bearer token gets its own budget, even from the same IP.
+    const okB = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+      headers: otherAuth,
+      payload: {},
+    });
+    expect(okB.statusCode).toBe(201);
+  }, 30000);
 });
 
 describe('POST /api/v1/invites/redeem', () => {
