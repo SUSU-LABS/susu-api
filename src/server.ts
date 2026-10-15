@@ -18,7 +18,7 @@ import { createNotificationReadModel, type NotificationReadModel } from './db/no
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
-import { getDb } from './db/client';
+import { closeDb, getDb } from './db/client';
 import { createRequireAuth } from './auth/guard';
 import { createTokenVerifier, type TokenVerifier } from './auth/verify';
 import {
@@ -270,6 +270,11 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   if (options.walletLinkStore === undefined) {
     startNonceReaping(walletLinkStore, app.log);
   }
+
+  // Close database pool on server shutdown
+  app.addHook('onClose', async () => {
+    await closeDb();
+  });
 
   return app;
 }

@@ -55,10 +55,26 @@ export function getDb(): NodePgDatabase<typeof schema> {
   return database;
 }
 
+let inFlightClose: Promise<void> | undefined;
+
 export async function closeDb(): Promise<void> {
+  if (inFlightClose !== undefined) {
+    await inFlightClose;
+    return;
+  }
   if (pool !== undefined) {
-    await pool.end();
+    const activePool = pool;
     pool = undefined;
     database = undefined;
+    inFlightClose = (async () => {
+      try {
+        if (!activePool.ended && !(activePool as { ending?: boolean }).ending) {
+          await activePool.end();
+        }
+      } finally {
+        inFlightClose = undefined;
+      }
+    })();
+    await inFlightClose;
   }
 }
