@@ -517,6 +517,7 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroupContractId: GROUP_CONTRACT_ID,
       shouldClaim: expect.any(Function),
     });
   });
@@ -526,9 +527,7 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     store.redeem = vi.fn(
       async () =>
         ({
-          outcome: 'redeemed',
-          inviteId: 'invite-id',
-          groupContractId: OTHER_CONTRACT_ID,
+          outcome: 'not_found',
         }) as RedeemOutcome,
     );
     const { app } = await harness({ store });
@@ -546,6 +545,11 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     // about the code.
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: 'invite_not_found' });
+    expect(store.redeem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedGroupContractId: GROUP_CONTRACT_ID,
+      }),
+    );
   });
 
   it('accepts a code whose group matches the path', async () => {
