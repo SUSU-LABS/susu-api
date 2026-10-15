@@ -548,6 +548,95 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     expect(response.json()).toEqual({ error: 'invite_not_found' });
   });
 
+  it('does not consume a use when the code names a different group', async () => {
+    // Faithful fake: honours shouldClaim the way the real store does — a
+    // `false` answer records nothing, `uses` and `invite_redemptions` stay
+    // untouched.
+    let writes = 0;
+    const store = fakeStore();
+    store.redeem = vi.fn(
+      async (input: {
+        code: string;
+        userId: string;
+        shouldClaim?: (groupContractId: string) => Promise<boolean>;
+      }) => {
+        const claim =
+          input.shouldClaim === undefined || (await input.shouldClaim(GROUP_CONTRACT_ID));
+        if (!claim) {
+          return {
+            outcome: 'redeemed',
+            inviteId: 'invite-id',
+            groupContractId: GROUP_CONTRACT_ID,
+            claimed: false,
+          } as RedeemOutcome;
+        }
+        writes += 1;
+        return {
+          outcome: 'redeemed',
+          inviteId: 'invite-id',
+          groupContractId: GROUP_CONTRACT_ID,
+          claimed: true,
+        } as RedeemOutcome;
+      },
+    );
+    const { app, groupStatus } = await harness({ store });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${OTHER_CONTRACT_ID}/join`,
+      headers: AUTH,
+      payload: { code: CODE },
+    });
+
+    // Wrong group: answered as absent, and the mismatch refuses the claim
+    // before the read-model lookup even runs, so nothing is written.
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: 'invite_not_found' });
+    expect(writes).toBe(0);
+    expect(groupStatus).not.toHaveBeenCalled();
+  });
+
+  it('consumes a use when the code names the path group', async () => {
+    let writes = 0;
+    const store = fakeStore();
+    store.redeem = vi.fn(
+      async (input: {
+        code: string;
+        userId: string;
+        shouldClaim?: (groupContractId: string) => Promise<boolean>;
+      }) => {
+        const claim =
+          input.shouldClaim === undefined || (await input.shouldClaim(GROUP_CONTRACT_ID));
+        if (!claim) {
+          return {
+            outcome: 'redeemed',
+            inviteId: 'invite-id',
+            groupContractId: GROUP_CONTRACT_ID,
+            claimed: false,
+          } as RedeemOutcome;
+        }
+        writes += 1;
+        return {
+          outcome: 'redeemed',
+          inviteId: 'invite-id',
+          groupContractId: GROUP_CONTRACT_ID,
+          claimed: true,
+        } as RedeemOutcome;
+      },
+    );
+    const { app } = await harness({ store });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/join`,
+      headers: AUTH,
+      payload: { code: CODE },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(writes).toBe(1);
+  });
+
   it('accepts a code whose group matches the path', async () => {
     const { app } = await harness();
 

@@ -160,7 +160,12 @@ export async function inviteRoutes(
       // `undefined` means the index has not seen the group yet, which is the
       // normal state for a creator's brand-new group, so it claims. Only a status
       // that is positively known and not `open` withholds the claim.
+      // An answer of `false` leaves the invite exactly as it was: the route's
+      // wrong-group check below reports the code as absent, so spending a use
+      // for a join that can never happen is refused here, before anything is
+      // written.
       shouldClaim: async (groupContractId) => {
+        if (expectedGroup !== undefined && groupContractId !== expectedGroup) return false;
         const status = await groupStatus(groupContractId);
         return status === undefined || status === 'open';
       },
