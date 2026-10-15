@@ -512,11 +512,12 @@ describe('POST /api/v1/groups/:contractId/join', () => {
       groupContractId: GROUP_CONTRACT_ID,
       inviteId: 'invite-id',
     });
-    // The store is also asked whether this redemption should spend a use. The
-    // answer is exercised in its own block below; here only the call shape matters.
+    // The store is told which group the path named, because that is the only
+    // thing that can make a mismatch detectable before a use is spent.
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroupContractId: GROUP_CONTRACT_ID,
       shouldClaim: expect.any(Function),
     });
   });

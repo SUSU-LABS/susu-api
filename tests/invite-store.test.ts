@@ -318,3 +318,70 @@ describe('the claim check no longer runs under the row lock', () => {
     expect(await redemptionCount(invite.id)).toBe(users.length);
   });
 });
+
+describe('a claim made against a different group', () => {
+  it('reports not_found and writes nothing when expectedGroup does not match', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroupContractId: OTHER_CONTRACT_ID,
+    });
+
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+  });
+
+  it('leaves the use for the join that is actually for this group', async () => {
+    const invite = await seedInvite(1);
+    const wrongUser = nextUser();
+    const rightUser = nextUser();
+    await testDb.createUser(wrongUser);
+    await testDb.createUser(rightUser);
+
+    await store.redeem({
+      code: invite.code,
+      userId: wrongUser,
+      expectedGroupContractId: OTHER_CONTRACT_ID,
+    });
+
+    const joined = await store.redeem({
+      code: invite.code,
+      userId: rightUser,
+      expectedGroupContractId: GROUP_CONTRACT_ID,
+    });
+
+    expect(joined).toEqual({
+      outcome: 'redeemed',
+      inviteId: invite.id,
+      groupContractId: GROUP_CONTRACT_ID,
+      claimed: true,
+    });
+    expect(await usesOf(invite.id)).toBe(1);
+    expect(await redemptionCount(invite.id)).toBe(1);
+  });
+
+  it('does not ask shouldClaim when the group does not match', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    let asked = false;
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroupContractId: OTHER_CONTRACT_ID,
+      shouldClaim: async () => {
+        asked = true;
+        return true;
+      },
+    });
+
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(asked).toBe(false);
+  });
+});
