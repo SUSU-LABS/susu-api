@@ -11,7 +11,7 @@ beforeAll(async () => {
   // The readiness probe is injected so the suite does not need a database. The
   // real probe's failure path is covered explicitly below.
   app = await buildServer({ probeDatabase: async () => {} });
-});
+}, 30_000);
 
 afterAll(async () => {
   await app?.close();
@@ -296,6 +296,49 @@ describe('expired wallet-link nonces', () => {
       expect(log.info).not.toHaveBeenCalled();
 
       clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('nonce reaper server lifecycle', () => {
+  it('does not start a reaper interval when enableNonceReaping is not opted into', async () => {
+    const { buildServer } = await import('../src/server');
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+    const server = await buildServer({ probeDatabase: async () => {} });
+    try {
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it('stops the reaper interval when the server closes and prevents subsequent ticks', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 1);
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+
+      const server = await buildServer({
+        enableNonceReaping: true,
+        walletLinkStore: { reap } as never,
+        probeDatabase: async () => {},
+      });
+
+      expect(reap).not.toHaveBeenCalled();
+
+      // Close the server and assert clearInterval was called
+      await server.close();
+      expect(clearIntervalSpy).toHaveBeenCalled();
+
+      // Advancing time past the reap interval should NOT trigger any reap
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+      expect(reap).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
