@@ -26,6 +26,10 @@ export type SorobanSimulator = (
   transaction: Transaction,
 ) => Promise<rpc.Api.SimulateTransactionResponse>;
 
+export type CreateSorobanSimulatorOptions = {
+  timeoutMs?: number;
+};
+
 /**
  * Builds a simulator against one RPC endpoint.
  *
@@ -35,11 +39,15 @@ export type SorobanSimulator = (
  * over plain HTTP, and refusing that would mean `prepare` could not be exercised
  * against the network it is developed on.
  */
-export function createSorobanSimulator(url: string): SorobanSimulator {
+export function createSorobanSimulator(
+  url: string,
+  options: CreateSorobanSimulatorOptions = {},
+): SorobanSimulator {
   let server: rpc.Server | undefined;
+  const timeoutMs = options.timeoutMs ?? 10_000;
 
   return async (transaction) => {
-    server ??= new rpc.Server(url, { allowHttp: url.startsWith('http://') });
+    server ??= new rpc.Server(url, { allowHttp: url.startsWith('http://'), timeout: timeoutMs });
     return await server.simulateTransaction(transaction);
   };
 }
