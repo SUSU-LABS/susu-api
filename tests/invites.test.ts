@@ -285,6 +285,23 @@ describe('POST /api/v1/groups/:contractId/invites', () => {
 
     expect(response.headers['cache-control']).toBe('no-store');
   });
+
+  it('rate limits invite creations per user with 429', async () => {
+    const { app } = await harness();
+
+    let lastStatus = 201;
+    for (let i = 0; i < 11; i++) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        payload: { maxUses: 5 },
+      });
+      lastStatus = response.statusCode;
+    }
+
+    expect(lastStatus).toBe(429);
+  });
 });
 
 describe('POST /api/v1/invites/redeem', () => {
