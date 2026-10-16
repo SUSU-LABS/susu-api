@@ -56,6 +56,8 @@ export type BuildServerOptions = {
   sorobanSimulator?: SorobanSimulator;
   trustProxy?: FastifyServerOptions['trustProxy'];
   rateLimitMax?: number;
+  /** Whether to start background nonce reaping. Defaults to true when walletLinkStore is not injected. */
+  reapNonces?: boolean;
 };
 
 /**
@@ -263,12 +265,12 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     });
   });
 
-  // Started only when the store was not injected, which is the same condition as
-  // "this is the real service": a test that supplies a store does not want a
-  // background timer, and one that does not will not live long enough to see
-  // this fire.
-  if (options.walletLinkStore === undefined) {
-    startNonceReaping(walletLinkStore, app.log);
+  const shouldReap = options.reapNonces ?? options.walletLinkStore === undefined;
+  if (shouldReap) {
+    const reaperTimer = startNonceReaping(walletLinkStore, app.log);
+    app.addHook('onClose', async () => {
+      clearInterval(reaperTimer);
+    });
   }
 
   return app;

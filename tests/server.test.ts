@@ -300,4 +300,53 @@ describe('expired wallet-link nonces', () => {
       vi.useRealTimers();
     }
   });
+
+  it('clears the nonce reaper interval on server close and does not tick after close', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const fakeStore = { reap };
+
+      const testApp = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: fakeStore as never,
+        reapNonces: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      expect(reap).toHaveBeenCalledTimes(1);
+
+      await testApp.close();
+
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      expect(reap).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not run the nonce reaper in tests when disabled', async () => {
+    const { buildServer } = await import('../src/server');
+
+    vi.useFakeTimers();
+    try {
+      const reap = vi.fn(async () => 0);
+      const fakeStore = { reap };
+
+      const testApp = await buildServer({
+        probeDatabase: async () => {},
+        walletLinkStore: fakeStore as never,
+        reapNonces: false,
+      });
+
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+      expect(reap).not.toHaveBeenCalled();
+
+      await testApp.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
