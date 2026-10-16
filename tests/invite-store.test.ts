@@ -154,6 +154,32 @@ describe('a claim that is withheld', () => {
     expect(await usesOf(invite.id)).toBe(1);
     expect(await redemptionCount(invite.id)).toBe(1);
   });
+
+  it('writes nothing when the code targets a different group', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroupContractId: OTHER_CONTRACT_ID,
+    });
+
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+
+    // A subsequent redemption targeting the correct group succeeds and spends one use
+    const genuine = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroupContractId: GROUP_CONTRACT_ID,
+    });
+    expect(genuine).toMatchObject({ outcome: 'redeemed', claimed: true });
+    expect(await usesOf(invite.id)).toBe(1);
+    expect(await redemptionCount(invite.id)).toBe(1);
+  });
 });
 
 describe('a claim that is taken', () => {
