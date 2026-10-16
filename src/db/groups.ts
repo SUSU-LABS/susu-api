@@ -418,11 +418,11 @@ export function createGroupReadModel(db: NodePgDatabase<typeof schema>): GroupRe
             where c.contract_id = ${contractId} and c.round = r.round) as contribution_count,
           (select coalesce(sum(c.amount), 0)::text from public.contributions c
             where c.contract_id = ${contractId} and c.round = r.round) as contributed,
-          (select p.recipient_amount::text from public.payouts p
+          (select max(p.recipient_amount)::text from public.payouts p
             where p.contract_id = ${contractId} and p.round = r.round) as payout,
-          (select p.recipient from public.payouts p
+          (select max(p.recipient) from public.payouts p
             where p.contract_id = ${contractId} and p.round = r.round) as recipient,
-          (select f.fee::text from public.protocol_fees f
+          (select max(f.fee)::text from public.protocol_fees f
             where f.contract_id = ${contractId} and f.round = r.round) as fee
         from rounds r
         order by r.round
