@@ -17,6 +17,7 @@ import * as schema from './schema';
 
 let pool: Pool | undefined;
 let database: NodePgDatabase<typeof schema> | undefined;
+let closing: Promise<void> | undefined;
 
 export function getPool(): Pool {
   if (pool === undefined) {
@@ -55,10 +56,19 @@ export function getDb(): NodePgDatabase<typeof schema> {
   return database;
 }
 
-export async function closeDb(): Promise<void> {
-  if (pool !== undefined) {
-    await pool.end();
-    pool = undefined;
-    database = undefined;
-  }
+export function closeDb(): Promise<void> {
+  // Multiple server instances can share this module's pool. Their close hooks
+  // must await the same shutdown, rather than calling pool.end() twice.
+  if (closing !== undefined) return closing;
+  if (pool === undefined) return Promise.resolve();
+  closing = pool
+    .end()
+    .then(() => {
+      pool = undefined;
+      database = undefined;
+    })
+    .finally(() => {
+      closing = undefined;
+    });
+  return closing;
 }

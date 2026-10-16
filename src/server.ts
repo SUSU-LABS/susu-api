@@ -18,7 +18,7 @@ import { createNotificationReadModel, type NotificationReadModel } from './db/no
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
-import { getDb } from './db/client';
+import { closeDb, getDb } from './db/client';
 import { createRequireAuth } from './auth/guard';
 import { createTokenVerifier, type TokenVerifier } from './auth/verify';
 import {
@@ -103,6 +103,12 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     logger: buildLoggerOptions(env.NODE_ENV),
     bodyLimit: 64 * 1024,
     trustProxy,
+  });
+
+  // Fastify drains requests before onClose. Await the pool as part of that
+  // lifecycle so shutdown cannot finish while database work is still active.
+  app.addHook('onClose', async () => {
+    await closeDb();
   });
 
   await app.register(helmet, {
