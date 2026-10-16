@@ -120,6 +120,16 @@ describe('money is cast in SQL, not converted afterwards', () => {
     expect(roundsSql).toContain('coalesce(sum(c.amount), 0)::text');
   });
 
+  it('aggregates payout, recipient and fee so duplicate rows cannot fail the subquery', async () => {
+    const { db, execute } = stubDbSequence([[groupRow()], [], []]);
+    await createGroupReadModel(db).getGroup(GROUP_CONTRACT_ID);
+
+    const roundsSql = rendered(execute.mock.calls[2]?.[0]).replace(/\s+/g, ' ');
+    expect(roundsSql).toContain('max(p.recipient_amount)::text');
+    expect(roundsSql).toContain('max(p.recipient)');
+    expect(roundsSql).toContain('max(f.fee)::text');
+  });
+
   it('refuses an amount that arrived as a number instead of failing silently', async () => {
     // Simulates a lost `::text` cast, or a global type parser turning `numeric`
     // into a double. Returning the rounded value would be undetectable later.

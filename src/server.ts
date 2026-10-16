@@ -15,6 +15,7 @@ import { createWalletLinkStore, type WalletLinkStore } from './db/wallet';
 import { createInviteStore, type InviteStore } from './db/invites';
 import { createRegistrationStore, type RegistrationStore } from './db/registrations';
 import { createNotificationReadModel, type NotificationReadModel } from './db/notifications';
+import { createNotificationSweeper, type NotificationSweeper } from './db/notification-sweep';
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
@@ -52,6 +53,8 @@ export type BuildServerOptions = {
   inviteStore?: InviteStore;
   registrations?: RegistrationStore;
   notificationReadModel?: NotificationReadModel;
+  notificationSweeper?: NotificationSweeper;
+  sweepIntervalMs?: number;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
   trustProxy?: FastifyServerOptions['trustProxy'];
@@ -263,15 +266,60 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     });
   });
 
-  // Started only when the store was not injected, which is the same condition as
-  // "this is the real service": a test that supplies a store does not want a
-  // background timer, and one that does not will not live long enough to see
-  // this fire.
+  const sweeper = options.notificationSweeper ?? createNotificationSweeper(getDb());
+  const sweepIntervalMs = options.sweepIntervalMs ?? NOTIFICATION_SWEEP_INTERVAL_MS;
+
+  // Timers are lifecycle-managed: started unless explicitly disabled (by passing
+  // a mock or setting timer), and cleared when the Fastify instance closes.
+  const timers: ReturnType<typeof setInterval>[] = [];
+
   if (options.walletLinkStore === undefined) {
-    startNonceReaping(walletLinkStore, app.log);
+    timers.push(startNonceReaping(walletLinkStore, app.log));
   }
 
+  if (options.notificationSweeper === undefined) {
+    timers.push(startNotificationSweeper(sweeper, app.log, sweepIntervalMs));
+  }
+
+  app.addHook('onClose', async () => {
+    for (const timer of timers) {
+      clearInterval(timer);
+    }
+  });
+
   return app;
+}
+
+/** How often notification derivation runs in the application when pg_cron is absent. */
+const NOTIFICATION_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Runs the notification sweeper on an interval as a fallback when pg_cron is unavailable.
+ *
+ * `derive_notifications` is idempotent: it examines unnotified events, checks for a linked
+ * wallet, writes user notifications, and marks unaddressable events. Two sweeps running
+ * concurrently or running alongside pg_cron do not duplicate notifications.
+ */
+export function startNotificationSweeper(
+  sweeper: Pick<NotificationSweeper, 'sweep'>,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+  intervalMs: number = NOTIFICATION_SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweeper
+      .sweep()
+      .then((result) => {
+        if (result.written > 0) {
+          log.info({ event: 'notification_sweep', ...result }, 'derived user notifications');
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn({ event: 'notification_sweep_failed', err: error }, 'notification sweep failed');
+      });
+  }, intervalMs);
+
+  timer.unref();
+  return timer;
 }
 
 /** How often spent nonces are cleared. Well inside the five-minute nonce lifetime. */

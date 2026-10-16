@@ -216,4 +216,26 @@ describe('createRegistrationStore.register', () => {
     );
     expect(rows.rows[0]?.['live']).toBe(MAX_LIVE_REGISTRATIONS);
   });
+
+  it('derives expires_at from the database clock and remains unaffected by application clock skew', async () => {
+    // Emulate host clock skew: application clock shifted backwards by 2 hours.
+    // Previously, Date.now() + TTL would produce an expires_at earlier than the database created_at (now()),
+    // violating group_registrations_window_positive (expires_at > created_at).
+    const originalDateNow = Date.now;
+    try {
+      Date.now = () => originalDateNow() - 2 * 60 * 60 * 1000;
+
+      const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
+      expect(result.outcome).toBe('registered');
+
+      // Verify the window in PostgreSQL: expires_at must be strictly ~30m in the future relative to created_at
+      const rows = await testDb.query(
+        'select extract(epoch from (expires_at - created_at))::int as seconds_diff from public.group_registrations where contract_id = $1',
+        [GROUP_CONTRACT_ID],
+      );
+      expect(Number(rows.rows[0]?.['seconds_diff'])).toBe(REGISTRATION_TTL_MS / 1000);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
 });
