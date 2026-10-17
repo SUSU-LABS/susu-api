@@ -123,7 +123,12 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             ),
           );
 
-        const expiresAt = new Date(Date.now() + REGISTRATION_TTL_MS);
+        // The expiry is computed by the database, not by the application host clock.
+        // `expiresAt` is compared against the database's `now()` in `isRegistered`
+        // and the cleanup delete, and `created_at` defaults to that same clock.
+        // Deriving expiry from host clock can violate the check constraint
+        // (expires_at > created_at) when host clock skews behind database clock.
+        const expiresAt = sql<Date>`now() + make_interval(secs => ${REGISTRATION_TTL_MS / 1000})`;
 
         // The cap is checked against the claim being *replaced*, so re-registering
         // an address an account already holds is never refused for being at the
@@ -156,7 +161,9 @@ export function createRegistrationStore(db: Database): RegistrationStore {
           return {
             outcome: 'registered',
             contractId,
-            expiresAt: (updated[0]?.expiresAt ?? expiresAt).toISOString(),
+            expiresAt: (
+              updated[0]?.expiresAt ?? new Date(Date.now() + REGISTRATION_TTL_MS)
+            ).toISOString(),
           } as const;
         }
 
@@ -185,7 +192,9 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         return {
           outcome: 'registered',
           contractId,
-          expiresAt: (holder[0]?.expiresAt ?? expiresAt).toISOString(),
+          expiresAt: (
+            holder[0]?.expiresAt ?? new Date(Date.now() + REGISTRATION_TTL_MS)
+          ).toISOString(),
         } as const;
       });
     },
