@@ -268,7 +268,10 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
   // background timer, and one that does not will not live long enough to see
   // this fire.
   if (options.walletLinkStore === undefined) {
-    startNonceReaping(walletLinkStore, app.log);
+    const nonceReaperTimer = startNonceReaping(walletLinkStore, app.log);
+    app.addHook('onClose', async () => {
+      clearInterval(nonceReaperTimer);
+    });
   }
 
   return app;
