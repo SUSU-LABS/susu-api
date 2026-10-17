@@ -17,6 +17,34 @@ afterAll(async () => {
   await app?.close();
 });
 
+describe('database lifecycle', () => {
+  it('ends the database pool when app.close() is called', async () => {
+    let closed = false;
+    const { buildServer } = await import('../src/server');
+    const server = await buildServer({
+      probeDatabase: async () => {},
+      closeDatabase: async () => {
+        closed = true;
+      },
+    });
+
+    expect(closed).toBe(false);
+    await server.close();
+    expect(closed).toBe(true);
+  });
+
+  it('invokes closeDb hook by default on shutdown', async () => {
+    const client = await import('../src/db/client');
+    const closeSpy = vi.spyOn(client, 'closeDb');
+    const { buildServer } = await import('../src/server');
+    const server = await buildServer({ probeDatabase: async () => {} });
+
+    await server.close();
+    expect(closeSpy).toHaveBeenCalled();
+    closeSpy.mockRestore();
+  });
+});
+
 describe('health routes', () => {
   it('reports liveness', async () => {
     const response = await app.inject({ method: 'GET', url: '/health' });
