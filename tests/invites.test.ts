@@ -34,14 +34,16 @@ function fakeStore(): FakeStore {
       uses: 0,
       createdAt: new Date(0).toISOString(),
     })),
-    redeem: vi.fn(
-      async () =>
-        ({
-          outcome: 'redeemed',
-          inviteId: 'invite-id',
-          groupContractId: GROUP_CONTRACT_ID,
-        }) as RedeemOutcome,
-    ),
+    redeem: vi.fn(async (input: { expectedGroup?: string }) => {
+      if (input.expectedGroup !== undefined && input.expectedGroup !== GROUP_CONTRACT_ID) {
+        return { outcome: 'not_found' } as RedeemOutcome;
+      }
+      return {
+        outcome: 'redeemed',
+        inviteId: 'invite-id',
+        groupContractId: GROUP_CONTRACT_ID,
+      } as RedeemOutcome;
+    }),
   } as unknown as FakeStore;
 }
 
@@ -322,6 +324,7 @@ describe('POST /api/v1/invites/redeem', () => {
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroup: undefined,
       shouldClaim: expect.any(Function),
     });
   });
@@ -517,25 +520,18 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroup: GROUP_CONTRACT_ID,
       shouldClaim: expect.any(Function),
     });
   });
 
   it('reports a code for a different group as absent', async () => {
     const store = fakeStore();
-    store.redeem = vi.fn(
-      async () =>
-        ({
-          outcome: 'redeemed',
-          inviteId: 'invite-id',
-          groupContractId: OTHER_CONTRACT_ID,
-        }) as RedeemOutcome,
-    );
     const { app } = await harness({ store });
 
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/join`,
+      url: `/api/v1/groups/${OTHER_CONTRACT_ID}/join`,
       headers: AUTH,
       payload: { code: CODE },
     });
@@ -546,6 +542,12 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     // about the code.
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: 'invite_not_found' });
+    expect(store.redeem).toHaveBeenCalledWith({
+      code: CODE,
+      userId: USER_ID,
+      expectedGroup: OTHER_CONTRACT_ID,
+      shouldClaim: expect.any(Function),
+    });
   });
 
   it('accepts a code whose group matches the path', async () => {

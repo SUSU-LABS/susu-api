@@ -152,6 +152,7 @@ export async function inviteRoutes(
     const result = await store.redeem({
       code,
       userId: user.id,
+      expectedGroup,
       // A code shared before the group started keeps working after it has, and
       // the chain refuses a join unless the group is still open — so treating
       // "the group has moved on" as a reason to spend a use bills the visitor for
@@ -168,14 +169,6 @@ export async function inviteRoutes(
 
     switch (result.outcome) {
       case 'redeemed':
-        // The code names the group. A caller that supplied a different one asked
-        // about the wrong group, which is answered the same way as an unknown
-        // code: the code is not for that group, and saying so confirms nothing
-        // about codes in general.
-        if (expectedGroup !== undefined && result.groupContractId !== expectedGroup) {
-          return inviteNotFound(reply);
-        }
-
         // Either this is the first redemption or this user redeemed before; both
         // are success, which is what makes retrying a join safe.
         return reply.send({
